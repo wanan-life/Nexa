@@ -1,0 +1,2 @@
+"""Nexa application package."""
+
