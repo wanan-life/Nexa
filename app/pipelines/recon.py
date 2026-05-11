@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -15,6 +16,8 @@ from app.repositories import AssetRepository, ServiceRepository
 from app.schemas.asset import AssetCreate
 from app.schemas.service import ServiceCreate
 from app.tooling import ToolResolver
+
+ProgressCallback = Callable[[str], None]
 
 
 @dataclass
@@ -107,6 +110,7 @@ async def collect_target(
     run_httpx: bool = True,
     tool_resolver: ToolResolver | None = None,
     continue_on_error: bool = True,
+    progress_callback: ProgressCallback | None = None,
 ) -> ReconSummary:
     if target.id is None:
         raise ValueError("target must be persisted before collection")
@@ -114,8 +118,10 @@ async def collect_target(
     summary = ReconSummary(target=target.name)
     collected: list[CollectedAsset] = []
     tools = tool_resolver or ToolResolver()
+    _emit(progress_callback, f"Preparing target {target.name}")
 
     if use_subfinder:
+        _emit(progress_callback, f"Running subfinder for {target.root_domain}")
         result = await _run_asset_collector(
             "subfinder",
             SubfinderCollector(
@@ -127,8 +133,12 @@ async def collect_target(
         )
         summary.collector_results.append(CollectorRunResult("subfinder", len(result.assets), result.error))
         collected.extend(result.assets)
+        _emit(progress_callback, _format_stage_done("subfinder", len(result.assets), result.error))
+    else:
+        _emit(progress_callback, "Skipping subfinder")
 
     if use_oneforall:
+        _emit(progress_callback, f"Running OneForAll for {target.root_domain}")
         result = await _run_asset_collector(
             "oneforall",
             OneForAllCollector(
@@ -140,22 +150,35 @@ async def collect_target(
         )
         summary.collector_results.append(CollectorRunResult("oneforall", len(result.assets), result.error))
         collected.extend(result.assets)
+        _emit(progress_callback, _format_stage_done("OneForAll", len(result.assets), result.error))
+    else:
+        _emit(progress_callback, "Skipping OneForAll")
 
+    _emit(progress_callback, f"Upserting {len(collected)} collected assets")
     summary.assets_seen = upsert_collected_assets(session, target.id, collected)
+    _emit(progress_callback, f"Asset upsert finished: {summary.assets_seen}")
 
     if run_httpx:
+        _emit(progress_callback, "Preparing hosts for httpx")
         assets = AssetRepository(session).list_by_target(target.id)
         hosts_file = _write_hosts_file(target.name, assets)
         try:
+            _emit(progress_callback, f"Running httpx for {len(assets)} assets")
             httpx_results = await HTTPXRunner(binary=str(tools.httpx_binary)).probe_file(hosts_file)
+            _emit(progress_callback, f"Upserting {len(httpx_results)} HTTP services")
             summary.services_seen = upsert_httpx_results(session, target.id, httpx_results)
             summary.alive_assets = len({result.host for result in httpx_results})
             summary.collector_results.append(CollectorRunResult("httpx", summary.services_seen, None))
+            _emit(progress_callback, f"httpx finished: {summary.services_seen} services")
         except (CollectorError, ValueError) as exc:
             summary.collector_results.append(CollectorRunResult("httpx", 0, str(exc)))
+            _emit(progress_callback, f"httpx failed: {exc}")
             if not continue_on_error:
                 raise
+    else:
+        _emit(progress_callback, "Skipping httpx")
 
+    _emit(progress_callback, "Scan pipeline finished")
     return summary
 
 
@@ -205,3 +228,14 @@ def _write_hosts_file(target_name: str, assets: list[Asset]) -> Path:
 
 def collect_target_sync(*args, **kwargs) -> ReconSummary:
     return asyncio.run(collect_target(*args, **kwargs))
+
+
+def _emit(progress_callback: ProgressCallback | None, message: str) -> None:
+    if progress_callback:
+        progress_callback(message)
+
+
+def _format_stage_done(name: str, count: int, error: str | None) -> str:
+    if error:
+        return f"{name} failed: {error}"
+    return f"{name} finished: {count} assets"

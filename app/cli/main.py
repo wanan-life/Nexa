@@ -6,6 +6,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from app.config import get_settings
 from app.database import create_session, init_db
 from app.pipelines.recon import (
     ReconSummary,
@@ -43,6 +44,7 @@ HELP_GROUPS: list[dict[str, object]] = [
             ("targets", "List targets.", "列出所有目标。"),
             ("show-target", "Show one target.", "查看单个目标详情。"),
             ("delete-target", "Delete a target by name.", "按名称删除目标。"),
+            ("del-target", "Alias of delete-target.", "delete-target 的短别名。"),
         ],
     },
     {
@@ -242,18 +244,44 @@ def _print_asset_rows(rows: list[SearchRow], title: str) -> None:
     console.print(table)
 
 
-def _scan_target(target_ref: str, use_subfinder: bool, use_oneforall: bool, use_httpx: bool, strict: bool) -> None:
+def _scan_target(
+    target_ref: str,
+    use_subfinder: bool | None,
+    use_oneforall: bool | None,
+    use_httpx: bool | None,
+    strict: bool,
+) -> None:
+    resolved_subfinder, resolved_oneforall, resolved_httpx = _resolve_scan_tools(
+        use_subfinder,
+        use_oneforall,
+        use_httpx,
+    )
     with create_session() as session:
         target_obj = _require_target_ref(session, target_ref)
-        summary = collect_target_sync(
-            session,
-            target_obj,
-            use_subfinder=use_subfinder,
-            use_oneforall=use_oneforall,
-            run_httpx=use_httpx,
-            continue_on_error=not strict,
-        )
+        with console.status("[cyan]Starting scan pipeline...[/cyan]", spinner="dots") as status:
+            summary = collect_target_sync(
+                session,
+                target_obj,
+                use_subfinder=resolved_subfinder,
+                use_oneforall=resolved_oneforall,
+                run_httpx=resolved_httpx,
+                continue_on_error=not strict,
+                progress_callback=lambda message: status.update(f"[cyan]{message}[/cyan]"),
+            )
     _print_recon_summary(summary)
+
+
+def _resolve_scan_tools(
+    use_subfinder: bool | None,
+    use_oneforall: bool | None,
+    use_httpx: bool | None,
+) -> tuple[bool, bool, bool]:
+    defaults = get_settings().scan_tool_defaults
+    return (
+        defaults.subfinder if use_subfinder is None else use_subfinder,
+        defaults.oneforall if use_oneforall is None else use_oneforall,
+        defaults.httpx if use_httpx is None else use_httpx,
+    )
 
 
 @app.command()
@@ -349,9 +377,9 @@ def show_target(name: str) -> None:
 def target_command(
     target_ref: str = typer.Argument(..., help="Target id or name, e.g. 1 or jd.com."),
     scan: bool = typer.Option(False, "--scan", help="Run subdomain collection and httpx probing."),
-    subfinder: bool = typer.Option(True, "--subfinder/--no-subfinder", help="Run subfinder."),
-    oneforall: bool = typer.Option(True, "--oneforall/--no-oneforall", help="Run bundled OneForAll."),
-    httpx: bool = typer.Option(True, "--httpx/--no-httpx", help="Run httpx after asset collection."),
+    subfinder: bool | None = typer.Option(None, "--subfinder/--no-subfinder", help="Override subfinder config."),
+    oneforall: bool | None = typer.Option(None, "--oneforall/--no-oneforall", help="Override OneForAll config."),
+    httpx: bool | None = typer.Option(None, "--httpx/--no-httpx", help="Override httpx config."),
     strict: bool = typer.Option(False, "--strict", help="Stop on first collector error."),
 ) -> None:
     """Show or scan a target by id/name."""
@@ -419,6 +447,7 @@ def use_target(
                 console.print(f"[red]Query error:[/red] {exc}")
 
 
+@app.command("del-target")
 @app.command("delete-target")
 def delete_target(name: str) -> None:
     """Delete a target by name."""
@@ -630,25 +659,28 @@ def scan_http(
 @app.command("collect-target")
 def collect_target_command(
     target: str = typer.Option(..., help="Target name or root domain."),
-    subfinder: bool = typer.Option(True, "--subfinder/--no-subfinder", help="Run subfinder."),
-    oneforall: bool = typer.Option(True, "--oneforall/--no-oneforall", help="Run bundled OneForAll."),
-    httpx: bool = typer.Option(True, "--httpx/--no-httpx", help="Run httpx after asset collection."),
+    subfinder: bool | None = typer.Option(None, "--subfinder/--no-subfinder", help="Override subfinder config."),
+    oneforall: bool | None = typer.Option(None, "--oneforall/--no-oneforall", help="Override OneForAll config."),
+    httpx: bool | None = typer.Option(None, "--httpx/--no-httpx", help="Override httpx config."),
     strict: bool = typer.Option(False, "--strict", help="Stop on first collector error."),
 ) -> None:
     """Run target collection pipeline with subfinder/oneforall/httpx."""
 
     init_db()
+    resolved_subfinder, resolved_oneforall, resolved_httpx = _resolve_scan_tools(subfinder, oneforall, httpx)
     with create_session() as session:
         target_repo = TargetRepository(session)
         target_obj = target_repo.get_by_name(target) or target_repo.create(TargetCreate(name=target))
-        summary = collect_target_sync(
-            session,
-            target_obj,
-            use_subfinder=subfinder,
-            use_oneforall=oneforall,
-            run_httpx=httpx,
-            continue_on_error=not strict,
-        )
+        with console.status("[cyan]Starting scan pipeline...[/cyan]", spinner="dots") as status:
+            summary = collect_target_sync(
+                session,
+                target_obj,
+                use_subfinder=resolved_subfinder,
+                use_oneforall=resolved_oneforall,
+                run_httpx=resolved_httpx,
+                continue_on_error=not strict,
+                progress_callback=lambda message: status.update(f"[cyan]{message}[/cyan]"),
+            )
     _print_recon_summary(summary)
 
 

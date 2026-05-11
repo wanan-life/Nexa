@@ -1,0 +1,14 @@
+# Default tool switches used by:
+#   nexa target <id-or-name> --scan
+#   nexa collect-target --target <name>
+#
+# CLI flags still override these defaults for a single run:
+#   --subfinder / --no-subfinder
+#   --oneforall / --no-oneforall
+#   --httpx / --no-httpx
+
+[tools]
+subfinder = true
+oneforall = true
+httpx = true
+

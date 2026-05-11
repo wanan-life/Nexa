@@ -1,6 +1,7 @@
 # Nexa
 
 [中文文档](README.md) | English
+![nexa](docs/images/nexa.svg)
 
 Nexa is a bug bounty attack surface intelligence platform for authorized reconnaissance workflows.
 
@@ -105,6 +106,36 @@ The bootstrap script currently installs:
 
 If a bundled tool is missing or fails, Nexa reports the error in the Nexa summary and continues when possible.
 
+## Scan Manifest
+
+The default tools enabled by `--scan` are controlled by `config/scan.toml`:
+
+```toml
+[tools]
+subfinder = true
+oneforall = true
+httpx = true
+```
+
+For example, to disable OneForAll by default and keep subfinder/httpx enabled:
+
+```toml
+[tools]
+subfinder = true
+oneforall = false
+httpx = true
+```
+
+CLI flags can temporarily override the manifest:
+
+```bash
+nexa target 1 --scan --oneforall
+nexa target 1 --scan --no-httpx
+nexa collect-target --target jd.com --no-subfinder
+```
+
+During scans, the CLI displays the active stage, such as running subfinder, OneForAll, httpx, or database upserts, so long-running tasks do not look stuck.
+
 ## Quick Start
 
 Create a target:
@@ -113,6 +144,15 @@ Create a target:
 nexa add-target jd.com --program-name "JD SRC" --scope-type in-scope
 nexa targets
 ```
+
+If one bounty program contains multiple root domains, the current recommended workflow is to create one Target per root domain and group them with the same `program_name`:
+
+```bash
+nexa add-target aaa.com --program-name "Example SRC"
+nexa add-target bbb.com --program-name "Example SRC"
+```
+
+At this stage, Target is still the scan and query unit. `program_name` is used for display and manual grouping. Program-level aggregation commands are planned for unified search, export, and prioritization across multiple Targets.
 
 Run target-level collection:
 
@@ -139,6 +179,38 @@ Probe only existing assets:
 ```bash
 nexa scan-http --target jd.com
 ```
+
+You do not need to delete a Target to refresh assets. Run the scan or import commands again:
+
+```bash
+nexa target 1 --scan
+nexa import-subdomains --target jd.com --file new-subdomains.txt --source subfinder
+nexa import-httpx --target jd.com --file new-httpx.jsonl
+```
+
+Nexa upserts by host/url: existing assets update `last_seen`, source, alive state, and service fingerprints; new assets are inserted.
+
+Delete a target:
+
+```bash
+nexa delete-target jd.com
+nexa del-target jd.com
+```
+
+`del-target` is a short alias of `delete-target`. Deleting a Target cascades to its assets, services, JS files, API endpoints, fingerprints, and risk records.
+
+## Common Command Screenshots
+
+Place screenshots under `docs/images/`. For GitHub archiving, replace these placeholders with terminal screenshots using the same filenames:
+
+```text
+docs/images/common-commands.svg
+docs/images/interactive-search.svg
+```
+
+![Common command screenshot](docs/images/common-commands.svg)
+
+![Interactive search screenshot](docs/images/interactive-search.svg)
 
 ## Import Existing Results
 
