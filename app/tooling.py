@@ -1,3 +1,4 @@
+import platform
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,7 +23,7 @@ class ToolResolver:
 
     @property
     def subfinder_binary(self) -> Path:
-        return self.tools_dir / "subfinder" / "subfinder"
+        return self.tools_dir / "subfinder" / executable_name("subfinder")
 
     @property
     def subfinder_config(self) -> Path:
@@ -34,7 +35,7 @@ class ToolResolver:
 
     @property
     def httpx_binary(self) -> Path:
-        return self.tools_dir / "httpx" / "httpx"
+        return self.tools_dir / "httpx" / executable_name("httpx")
 
     @property
     def oneforall_entrypoint(self) -> Path:
@@ -46,7 +47,7 @@ class ToolResolver:
 
     @property
     def oneforall_python(self) -> Path:
-        venv_python = self.oneforall_workdir / ".venv" / "bin" / "python"
+        venv_python = self.oneforall_workdir / ".venv" / oneforall_venv_python_path()
         if venv_python.exists():
             return venv_python
         return Path(sys.executable)
@@ -63,3 +64,15 @@ class ToolResolver:
                 "dependencies must be installed in tools/OneForAll/.venv or current Python",
             ),
         ]
+
+
+def executable_name(name: str) -> str:
+    if platform.system().lower() == "windows":
+        return f"{name}.exe"
+    return name
+
+
+def oneforall_venv_python_path() -> Path:
+    if platform.system().lower() == "windows":
+        return Path("Scripts") / "python.exe"
+    return Path("bin") / "python"

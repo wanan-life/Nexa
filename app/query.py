@@ -34,6 +34,8 @@ FIELD_ALIASES = {
     "ip": "ip",
     "host": "host",
     "domain": "host",
+    "domain_suffix": "host",
+    "domain.suffix": "host",
     "url": "url",
     "title": "title",
     "server": "server",
@@ -52,7 +54,7 @@ FIELD_ALIASES = {
 }
 
 TERM_RE = re.compile(
-    r"^\s*(?P<field>[a-zA-Z_][a-zA-Z0-9_-]*)\s*(?P<op>!=|=)\s*"
+    r"^\s*(?P<field>[a-zA-Z_][a-zA-Z0-9_.-]*)\s*(?P<op>!=|=)\s*"
     r"(?P<value>\"[^\"]*\"|'[^']*'|[^&|]+?)\s*$"
 )
 

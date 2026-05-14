@@ -8,4 +8,5 @@ __pycache__/
 data/*.db
 data/runs/
 tools/OneForAll/.venv/
-
+config/providers.toml
+config/nexa.toml

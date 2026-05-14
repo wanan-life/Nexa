@@ -12,6 +12,9 @@ from app.collectors.subfinder import SubfinderCollector, parse_subfinder_file
 from app.config import get_settings
 from app.models.asset import Asset
 from app.models.target import Target
+from app.providers.base import OnlineAssetResult
+from app.providers.query import build_target_query
+from app.providers.search import search_online_assets
 from app.repositories import AssetRepository, ServiceRepository
 from app.schemas.asset import AssetCreate
 from app.schemas.service import ServiceCreate
@@ -108,6 +111,7 @@ async def collect_target(
     use_subfinder: bool = True,
     use_oneforall: bool = False,
     run_httpx: bool = True,
+    use_online_providers: bool = True,
     tool_resolver: ToolResolver | None = None,
     continue_on_error: bool = True,
     progress_callback: ProgressCallback | None = None,
@@ -118,6 +122,7 @@ async def collect_target(
     summary = ReconSummary(target=target.name)
     collected: list[CollectedAsset] = []
     tools = tool_resolver or ToolResolver()
+    settings = get_settings()
     _emit(progress_callback, f"Preparing target {target.name}")
 
     if use_subfinder:
@@ -154,9 +159,45 @@ async def collect_target(
     else:
         _emit(progress_callback, "Skipping OneForAll")
 
+    online_results: list[OnlineAssetResult] = []
+    if use_online_providers:
+        enabled_providers = [
+            name for name, config in settings.provider_configs.items() if config.enabled
+        ]
+        if enabled_providers:
+            query = build_target_query(target.root_domain)
+            _emit(progress_callback, f"Running online providers for {target.root_domain}: {', '.join(enabled_providers)}")
+            online_results, online_errors, online_metas = search_online_assets(
+                query=query,
+                configs=settings.provider_configs,
+                provider_name="all",
+                limit=settings.scan_tool_defaults.online_limit,
+            )
+            for meta in online_metas:
+                summary.collector_results.append(
+                    CollectorRunResult(
+                        f"online:{meta.provider}",
+                        meta.returned,
+                        meta.message or None,
+                    )
+                )
+            for error in online_errors:
+                summary.collector_results.append(CollectorRunResult("online", 0, error))
+            collected.extend(_online_results_to_assets(online_results))
+            _emit(progress_callback, f"online providers finished: {len(online_results)} rows")
+        else:
+            _emit(progress_callback, "Skipping online providers: no provider enabled")
+    else:
+        _emit(progress_callback, "Skipping online providers")
+
     _emit(progress_callback, f"Upserting {len(collected)} collected assets")
     summary.assets_seen = upsert_collected_assets(session, target.id, collected)
     _emit(progress_callback, f"Asset upsert finished: {summary.assets_seen}")
+    if online_results:
+        _emit(progress_callback, f"Upserting {len(online_results)} online provider services")
+        online_services = upsert_online_results(session, target.id, online_results)
+        summary.services_seen += online_services
+        _emit(progress_callback, f"Online provider service upsert finished: {online_services}")
 
     if run_httpx:
         _emit(progress_callback, "Preparing hosts for httpx")
@@ -215,6 +256,61 @@ def _parse_subdomain_file(file: Path, source: str) -> list[CollectedAsset]:
         if host and not host.startswith("#"):
             assets.append(CollectedAsset(host=host, source=source))
     return assets
+
+
+def upsert_online_results(session: Session, target_id: int, results: list[OnlineAssetResult]) -> int:
+    asset_repo = AssetRepository(session)
+    service_repo = ServiceRepository(session)
+    count = 0
+    for result in results:
+        host = result.host or _host_from_url(result.url) or result.ip
+        if not host:
+            continue
+        asset = asset_repo.upsert(
+            AssetCreate(
+                target_id=target_id,
+                host=host,
+                source=f"online:{result.provider}",
+                ip=result.ip or None,
+                is_alive=bool(result.url),
+            )
+        )
+        if result.url:
+            service_repo.upsert(
+                ServiceCreate(
+                    asset_id=asset.id,
+                    url=result.url,
+                    port=result.port,
+                    title=result.title or None,
+                    server=result.server or None,
+                    technologies=result.technologies,
+                )
+            )
+            count += 1
+    return count
+
+
+def _online_results_to_assets(results: list[OnlineAssetResult]) -> list[CollectedAsset]:
+    assets: list[CollectedAsset] = []
+    for result in results:
+        host = result.host or _host_from_url(result.url) or result.ip
+        if host:
+            assets.append(
+                CollectedAsset(
+                    host=host,
+                    source=f"online:{result.provider}",
+                    ip=result.ip or None,
+                )
+            )
+    return assets
+
+
+def _host_from_url(url: str) -> str:
+    if not url:
+        return ""
+    from urllib.parse import urlparse
+
+    return urlparse(url if "://" in url else f"//{url}").hostname or ""
 
 
 def _write_hosts_file(target_name: str, assets: list[Asset]) -> Path:

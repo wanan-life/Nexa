@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from prompt_toolkit import HTML, PromptSession
 from prompt_toolkit.history import InMemoryHistory
 import typer
@@ -11,15 +9,15 @@ from app.database import create_session, init_db
 from app.pipelines.recon import (
     ReconSummary,
     collect_target_sync,
-    import_httpx_file,
-    import_subdomain_file,
 )
+from app.providers.base import OnlineAssetResult, OnlineSearchMeta
+from app.providers.search import search_online_assets
 from app.query import QuerySyntaxError, SearchRow, list_target_rows, search_target_assets
-from app.repositories import AssetRepository, ServiceRepository, TargetRepository
-from app.schemas.asset import AssetCreate
-from app.schemas.service import ServiceCreate
+from app.repositories import TargetRepository
+from app.risk import RiskAssetSummary, analyze_target_risk, preview_target_risk, top_risk_assets
 from app.schemas.target import TargetCreate
 from app.tooling import ToolResolver
+from scripts.bootstrap_tools import bootstrap_tools
 
 app = typer.Typer(help="Nexa attack surface intelligence CLI.", no_args_is_help=True)
 console = Console()
@@ -48,37 +46,9 @@ HELP_GROUPS: list[dict[str, object]] = [
         ],
     },
     {
-        "name_en": "Assets",
-        "name_zh": "资产",
+        "name_en": "Scanning and Analysis",
+        "name_zh": "扫描与分析",
         "commands": [
-            ("add-asset", "Create or update an asset.", "创建或更新子域名/主机资产。"),
-            ("assets", "List assets for a target.", "列出目标下的资产。"),
-            ("delete-asset", "Delete an asset by host.", "按主机名删除资产。"),
-        ],
-    },
-    {
-        "name_en": "Services",
-        "name_zh": "服务",
-        "commands": [
-            ("add-service", "Create or update an HTTP service.", "创建或更新 HTTP/HTTPS 服务。"),
-            ("services", "List HTTP services for a target.", "列出目标下的 HTTP/HTTPS 服务。"),
-            ("delete-service", "Delete a service by id.", "按 ID 删除服务。"),
-        ],
-    },
-    {
-        "name_en": "Import and Analysis",
-        "name_zh": "导入与分析",
-        "commands": [
-            (
-                "import-subdomains",
-                "Import subfinder/oneforall/custom subdomain output.",
-                "导入 subfinder/oneforall/自定义子域名结果。",
-            ),
-            (
-                "import-httpx",
-                "Import httpx JSON/JSONL output.",
-                "导入 httpx JSON/JSONL 结果。",
-            ),
             (
                 "scan-http",
                 "Probe existing assets with httpx.",
@@ -90,12 +60,10 @@ HELP_GROUPS: list[dict[str, object]] = [
                 "运行 subfinder/oneforall/httpx 目标自动梳理流水线。",
             ),
             (
-                "analyze",
-                "Reserved: run fingerprint and risk analysis.",
-                "预留：执行指纹识别和风险分析。",
+                "online-search",
+                "Search enabled FOFA/Hunter/Shodan/ZoomEye providers.",
+                "调用已启用的 FOFA/Hunter/Shodan/ZoomEye 测绘接口。",
             ),
-            ("top", "Reserved: show high-value assets.", "预留：展示高价值资产列表。"),
-            ("export", "Reserved: export high-value assets.", "预留：导出高价值资产结果。"),
         ],
     },
 ]
@@ -170,13 +138,6 @@ def _require_target_ref(session, target_ref: str):
     return target
 
 
-def _require_asset(session, host: str):
-    asset = AssetRepository(session).get_by_host(host)
-    if not asset or asset.id is None:
-        raise typer.BadParameter(f"asset not found: {host}")
-    return asset
-
-
 def _print_recon_summary(summary: ReconSummary) -> None:
     table = Table(title=f"Nexa Summary: {summary.target}")
     table.add_column("Stage")
@@ -249,12 +210,14 @@ def _scan_target(
     use_subfinder: bool | None,
     use_oneforall: bool | None,
     use_httpx: bool | None,
+    use_online: bool | None,
     strict: bool,
 ) -> None:
-    resolved_subfinder, resolved_oneforall, resolved_httpx = _resolve_scan_tools(
+    resolved_subfinder, resolved_oneforall, resolved_httpx, resolved_online = _resolve_scan_tools(
         use_subfinder,
         use_oneforall,
         use_httpx,
+        use_online,
     )
     with create_session() as session:
         target_obj = _require_target_ref(session, target_ref)
@@ -265,6 +228,7 @@ def _scan_target(
                 use_subfinder=resolved_subfinder,
                 use_oneforall=resolved_oneforall,
                 run_httpx=resolved_httpx,
+                use_online_providers=resolved_online,
                 continue_on_error=not strict,
                 progress_callback=lambda message: status.update(f"[cyan]{message}[/cyan]"),
             )
@@ -275,21 +239,53 @@ def _resolve_scan_tools(
     use_subfinder: bool | None,
     use_oneforall: bool | None,
     use_httpx: bool | None,
-) -> tuple[bool, bool, bool]:
+    use_online: bool | None,
+) -> tuple[bool, bool, bool, bool]:
     defaults = get_settings().scan_tool_defaults
     return (
         defaults.subfinder if use_subfinder is None else use_subfinder,
         defaults.oneforall if use_oneforall is None else use_oneforall,
         defaults.httpx if use_httpx is None else use_httpx,
+        defaults.online_providers if use_online is None else use_online,
     )
 
 
 @app.command()
-def init() -> None:
+def init(
+    bootstrap: bool = typer.Option(False, "--bootstrap-tools", help="Download bundled tools without prompting."),
+    skip_tools: bool = typer.Option(False, "--skip-tools", help="Do not check or download bundled tools."),
+) -> None:
     """Initialize the SQLite database."""
 
     init_db()
+    config_path = get_settings().ensure_app_config()
     console.print("[green]Database initialized.[/green]")
+    console.print(f"[green]Config ready:[/green] {config_path}")
+    if not skip_tools:
+        _maybe_bootstrap_tools(force=bootstrap)
+
+
+def _maybe_bootstrap_tools(force: bool = False) -> None:
+    resolver = ToolResolver()
+    missing = [status for status in resolver.statuses() if not status.installed]
+    if not missing:
+        console.print("[green]Bundled tools are installed.[/green]")
+        return
+
+    missing_names = ", ".join(status.name for status in missing)
+    console.print(f"[yellow]Missing bundled tools:[/yellow] {missing_names}")
+    should_download = force or typer.confirm("Download bundled tools now?", default=False)
+    if not should_download:
+        console.print("[yellow]Skipped bundled tool bootstrap.[/yellow]")
+        return
+
+    try:
+        with console.status("[cyan]Downloading bundled tools...[/cyan]", spinner="dots"):
+            bootstrap_tools(root=get_settings().project_root)
+    except Exception as exc:
+        console.print(f"[red]Bundled tool bootstrap failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    console.print("[green]Bundled tool bootstrap completed.[/green]")
 
 
 @app.command("tools")
@@ -312,6 +308,113 @@ def tools_status() -> None:
             status.note,
         )
     console.print(table)
+
+
+@app.command("online-search")
+def online_search(
+    query: str = typer.Argument(..., help='Provider query, e.g. domain="example.com".'),
+    provider: str = typer.Option(
+        "all",
+        "--provider",
+        "-p",
+        help="Provider: all, fofa, hunter_qianxin, shodan, zoomeye.",
+    ),
+    limit: int = typer.Option(30, "--limit", "-l", min=1, help="Maximum results."),
+    debug: bool = typer.Option(False, "--debug", help="Show provider response metadata."),
+) -> None:
+    """Search enabled online cyberspace mapping providers."""
+
+    settings = get_settings()
+    try:
+        results, errors, metas = search_online_assets(
+            query=query,
+            configs=settings.provider_configs,
+            provider_name=provider,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    _print_online_results(results, f"Online Search: {query}")
+    if debug:
+        _print_online_metas(metas)
+    for error in errors:
+        console.print(f"[yellow]{error}[/yellow]")
+
+
+def _print_online_results(results: list[OnlineAssetResult], title: str) -> None:
+    table = Table(title=title)
+    table.add_column("Provider")
+    table.add_column("Host")
+    table.add_column("IP")
+    table.add_column("Port", justify="right")
+    table.add_column("URL")
+    table.add_column("Title")
+    table.add_column("Server")
+    for row in results:
+        table.add_row(
+            row.provider,
+            row.host,
+            row.ip,
+            str(row.port or ""),
+            row.url,
+            row.title,
+            row.server,
+        )
+    console.print(table)
+
+
+def _print_online_metas(metas: list[OnlineSearchMeta]) -> None:
+    table = Table(title="Provider Metadata")
+    table.add_column("Provider")
+    table.add_column("Total", justify="right")
+    table.add_column("Returned", justify="right")
+    table.add_column("Message")
+    for meta in metas:
+        table.add_row(
+            meta.provider,
+            str(meta.total) if meta.total is not None else "",
+            str(meta.returned),
+            meta.message,
+        )
+    console.print(table)
+
+
+def _print_risk_summaries(rows: list[RiskAssetSummary], title: str) -> None:
+    table = Table(title=title)
+    table.add_column("#", justify="right")
+    table.add_column("Target")
+    table.add_column("Score", justify="right")
+    table.add_column("Level")
+    table.add_column("Reasons")
+    for index, row in enumerate(rows, start=1):
+        target = row.service.url if row.service else row.asset.host
+        table.add_row(
+            str(index),
+            target,
+            str(row.total_score),
+            row.risk_level,
+            "\n".join(row.reasons[:3]),
+        )
+    console.print(table)
+
+
+def _render_markdown_top(rows: list[RiskAssetSummary], title: str) -> str:
+    lines = [f"# {title}", ""]
+    for index, row in enumerate(rows, start=1):
+        target = row.service.url if row.service else row.asset.host
+        lines.extend(
+            [
+                f"{index}. {target}",
+                f"   Score: {row.total_score}",
+                f"   Risk Level: {row.risk_level}",
+                "   Reasons:",
+            ]
+        )
+        lines.extend(f"   - {reason}" for reason in row.reasons)
+        lines.append("   Recommended:")
+        lines.extend(f"   - {step}" for step in row.recommended_next_steps)
+        lines.append("")
+    return "\n".join(lines)
 
 
 @app.command("add-target")
@@ -373,24 +476,44 @@ def show_target(name: str) -> None:
     console.print_json(data=target.model_dump(mode="json"))
 
 
-@app.command("target")
+@app.command("target", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
 def target_command(
+    ctx: typer.Context,
     target_ref: str = typer.Argument(..., help="Target id or name, e.g. 1 or jd.com."),
     scan: bool = typer.Option(False, "--scan", help="Run subdomain collection and httpx probing."),
     subfinder: bool | None = typer.Option(None, "--subfinder/--no-subfinder", help="Override subfinder config."),
     oneforall: bool | None = typer.Option(None, "--oneforall/--no-oneforall", help="Override OneForAll config."),
     httpx: bool | None = typer.Option(None, "--httpx/--no-httpx", help="Override httpx config."),
+    online: bool | None = typer.Option(None, "--online/--no-online", help="Override online provider config."),
     strict: bool = typer.Option(False, "--strict", help="Stop on first collector error."),
 ) -> None:
     """Show or scan a target by id/name."""
 
     init_db()
+    if ctx.args:
+        _print_target_extra_arg_hint(target_ref, ctx.args)
+        raise typer.Exit(code=2)
     if scan:
-        _scan_target(target_ref, subfinder, oneforall, httpx, strict)
+        _scan_target(target_ref, subfinder, oneforall, httpx, online, strict)
         return
     with create_session() as session:
         target_obj = _require_target_ref(session, target_ref)
         _print_target_detail(target_obj)
+
+
+def _print_target_extra_arg_hint(target_ref: str, args: list[str]) -> None:
+    requested = " ".join(args)
+    if requested in {"assets", "services"}:
+        console.print(
+            f"[yellow]'{requested}' is available inside interactive mode.[/yellow]\n"
+            f"Run: [bold]nexa use {target_ref}[/bold]\n"
+            f"Then type: [bold]{requested}[/bold]"
+        )
+        return
+    console.print(
+        f"[red]Unexpected target argument:[/red] {requested}\n"
+        f"Run [bold]nexa use {target_ref}[/bold] for target-scoped asset/service queries."
+    )
 
 
 @app.command("use")
@@ -460,181 +583,6 @@ def delete_target(name: str) -> None:
     console.print(f"[yellow]Target deleted:[/yellow] {name}")
 
 
-@app.command("add-asset")
-def add_asset(
-    target: str = typer.Option(..., help="Target name."),
-    host: str = typer.Option(..., help="Hostname or URL."),
-    asset_type: str = typer.Option("subdomain", help="Asset type."),
-    source: str = typer.Option("manual", help="Asset source."),
-    ip: str | None = typer.Option(None, help="Resolved IP."),
-    cname: str | None = typer.Option(None, help="CNAME record."),
-    alive: bool = typer.Option(False, "--alive", help="Mark asset as alive."),
-) -> None:
-    """Create or update an asset."""
-
-    init_db()
-    with create_session() as session:
-        target_obj = _require_target(session, target)
-        asset = AssetRepository(session).upsert(
-            AssetCreate(
-                target_id=target_obj.id,
-                host=host,
-                asset_type=asset_type,
-                source=source,
-                ip=ip,
-                cname=cname,
-                is_alive=alive,
-            )
-        )
-    console.print(f"[green]Asset saved:[/green] {asset.host} (id={asset.id})")
-
-
-@app.command("assets")
-def list_assets(
-    target: str = typer.Option(..., help="Target name."),
-    alive_only: bool = typer.Option(False, "--alive-only", help="Only list alive assets."),
-) -> None:
-    """List assets for a target."""
-
-    init_db()
-    with create_session() as session:
-        target_obj = _require_target(session, target)
-        assets = AssetRepository(session).list_by_target(target_obj.id, alive_only=alive_only)
-
-    table = Table(title=f"Assets: {target}")
-    table.add_column("ID", justify="right")
-    table.add_column("Host")
-    table.add_column("Type")
-    table.add_column("Source")
-    table.add_column("IP")
-    table.add_column("Alive")
-    for asset in assets:
-        table.add_row(
-            str(asset.id),
-            asset.host,
-            asset.asset_type,
-            asset.source,
-            asset.ip or "",
-            "yes" if asset.is_alive else "no",
-        )
-    console.print(table)
-
-
-@app.command("delete-asset")
-def delete_asset(host: str) -> None:
-    """Delete an asset by host."""
-
-    init_db()
-    with create_session() as session:
-        deleted = AssetRepository(session).delete_by_host(host)
-    if not deleted:
-        raise typer.BadParameter(f"asset not found: {host}")
-    console.print(f"[yellow]Asset deleted:[/yellow] {host}")
-
-
-@app.command("add-service")
-def add_service(
-    host: str = typer.Option(..., help="Existing asset host."),
-    url: str = typer.Option(..., help="Service URL."),
-    status_code: int | None = typer.Option(None, help="HTTP status code."),
-    title: str | None = typer.Option(None, help="HTML title."),
-    server: str | None = typer.Option(None, help="Server header."),
-    cdn: str | None = typer.Option(None, help="CDN fingerprint."),
-    waf: str | None = typer.Option(None, help="WAF fingerprint."),
-) -> None:
-    """Create or update an HTTP service."""
-
-    init_db()
-    with create_session() as session:
-        asset = _require_asset(session, host)
-        service = ServiceRepository(session).upsert(
-            ServiceCreate(
-                asset_id=asset.id,
-                url=url,
-                status_code=status_code,
-                title=title,
-                server=server,
-                cdn=cdn,
-                waf=waf,
-            )
-        )
-        asset.is_alive = True
-        session.add(asset)
-        session.commit()
-    console.print(f"[green]Service saved:[/green] {service.url} (id={service.id})")
-
-
-@app.command("services")
-def list_services(target: str = typer.Option(..., help="Target name.")) -> None:
-    """List HTTP services for a target."""
-
-    init_db()
-    with create_session() as session:
-        target_obj = _require_target(session, target)
-        services = ServiceRepository(session).list_by_target(target_obj.id)
-
-    table = Table(title=f"Services: {target}")
-    table.add_column("ID", justify="right")
-    table.add_column("URL")
-    table.add_column("Status")
-    table.add_column("Title")
-    table.add_column("Server")
-    table.add_column("CDN")
-    table.add_column("WAF")
-    for service in services:
-        table.add_row(
-            str(service.id),
-            service.url,
-            str(service.status_code or ""),
-            service.title or "",
-            service.server or "",
-            service.cdn or "",
-            service.waf or "",
-        )
-    console.print(table)
-
-
-@app.command("delete-service")
-def delete_service(service_id: int) -> None:
-    """Delete a service by id."""
-
-    init_db()
-    with create_session() as session:
-        deleted = ServiceRepository(session).delete(service_id)
-    if not deleted:
-        raise typer.BadParameter(f"service not found: {service_id}")
-    console.print(f"[yellow]Service deleted:[/yellow] {service_id}")
-
-
-@app.command("import-subdomains")
-def import_subdomains(
-    target: str = typer.Option(..., help="Target name."),
-    file: Path = typer.Option(..., exists=True, readable=True, help="Subdomain result file."),
-    source: str = typer.Option("subfinder", help="Source parser: subfinder, oneforall, or custom."),
-) -> None:
-    """Import subfinder/oneforall/custom subdomain output."""
-
-    init_db()
-    with create_session() as session:
-        target_obj = _require_target(session, target)
-        count = import_subdomain_file(session, target_obj, file, source)
-    console.print(f"[green]Imported assets:[/green] {count}")
-
-
-@app.command("import-httpx")
-def import_httpx(
-    target: str = typer.Option(..., help="Target name."),
-    file: Path = typer.Option(..., exists=True, readable=True, help="httpx JSONL output file."),
-) -> None:
-    """Import httpx JSON/JSONL output."""
-
-    init_db()
-    with create_session() as session:
-        target_obj = _require_target(session, target)
-        count = import_httpx_file(session, target_obj, file)
-    console.print(f"[green]Imported services:[/green] {count}")
-
-
 @app.command("scan-http")
 def scan_http(
     target: str = typer.Option(..., help="Target name."),
@@ -651,6 +599,7 @@ def scan_http(
             use_subfinder=False,
             use_oneforall=False,
             run_httpx=True,
+            use_online_providers=False,
             continue_on_error=not strict,
         )
     _print_recon_summary(summary)
@@ -662,12 +611,18 @@ def collect_target_command(
     subfinder: bool | None = typer.Option(None, "--subfinder/--no-subfinder", help="Override subfinder config."),
     oneforall: bool | None = typer.Option(None, "--oneforall/--no-oneforall", help="Override OneForAll config."),
     httpx: bool | None = typer.Option(None, "--httpx/--no-httpx", help="Override httpx config."),
+    online: bool | None = typer.Option(None, "--online/--no-online", help="Override online provider config."),
     strict: bool = typer.Option(False, "--strict", help="Stop on first collector error."),
 ) -> None:
     """Run target collection pipeline with subfinder/oneforall/httpx."""
 
     init_db()
-    resolved_subfinder, resolved_oneforall, resolved_httpx = _resolve_scan_tools(subfinder, oneforall, httpx)
+    resolved_subfinder, resolved_oneforall, resolved_httpx, resolved_online = _resolve_scan_tools(
+        subfinder,
+        oneforall,
+        httpx,
+        online,
+    )
     with create_session() as session:
         target_repo = TargetRepository(session)
         target_obj = target_repo.get_by_name(target) or target_repo.create(TargetCreate(name=target))
@@ -678,34 +633,54 @@ def collect_target_command(
                 use_subfinder=resolved_subfinder,
                 use_oneforall=resolved_oneforall,
                 run_httpx=resolved_httpx,
+                use_online_providers=resolved_online,
                 continue_on_error=not strict,
                 progress_callback=lambda message: status.update(f"[cyan]{message}[/cyan]"),
             )
     _print_recon_summary(summary)
 
 
-@app.command("analyze")
-def analyze(target: str = typer.Option(...)) -> None:
-    """Reserved: run fingerprint and risk analysis."""
+@app.command("analyze", hidden=True)
+def analyze(target: str = typer.Option(..., help="Target id or name.")) -> None:
+    """Experimental: run risk analysis for a target."""
 
-    _ = target
-    console.print("[yellow]Not implemented in MVP step 1. Planned for step 3.[/yellow]")
-
-
-@app.command("top")
-def top(target: str = typer.Option(...), limit: int = typer.Option(30)) -> None:
-    """Reserved: show high-value assets."""
-
-    _ = (target, limit)
-    console.print("[yellow]Not implemented in MVP step 1. Planned for step 3.[/yellow]")
+    init_db()
+    with create_session() as session:
+        target_obj = _require_target_ref(session, target)
+        count = analyze_target_risk(session, target_obj.id)
+    console.print(f"[green]Risk analysis completed:[/green] {count} findings")
 
 
-@app.command("export")
-def export(target: str = typer.Option(...), format: str = typer.Option("markdown")) -> None:
-    """Reserved: export high-value assets."""
+@app.command("top", hidden=True)
+def top(target: str = typer.Option(..., help="Target id or name."), limit: int = typer.Option(30)) -> None:
+    """Experimental: show high-value assets."""
 
-    _ = (target, format)
-    console.print("[yellow]Not implemented in MVP step 1. Planned for step 3.[/yellow]")
+    init_db()
+    with create_session() as session:
+        target_obj = _require_target_ref(session, target)
+        rows = top_risk_assets(session, target_obj.id, limit=limit)
+        if not rows:
+            rows = preview_target_risk(session, target_obj.id, limit=limit)
+    _print_risk_summaries(rows, f"High-value Assets: {target_obj.name}")
+
+
+@app.command("export", hidden=True)
+def export(
+    target: str = typer.Option(..., help="Target id or name."),
+    format: str = typer.Option("markdown", "--format", help="Export format: markdown."),
+    limit: int = typer.Option(30, "--limit", help="Maximum assets to export."),
+) -> None:
+    """Experimental: export high-value assets."""
+
+    if format.lower() not in {"markdown", "md"}:
+        raise typer.BadParameter("only markdown export is supported now")
+    init_db()
+    with create_session() as session:
+        target_obj = _require_target_ref(session, target)
+        rows = top_risk_assets(session, target_obj.id, limit=limit)
+        if not rows:
+            rows = preview_target_risk(session, target_obj.id, limit=limit)
+    console.print(_render_markdown_top(rows, f"高价值资产 Top {limit}: {target_obj.name}"))
 
 
 if __name__ == "__main__":

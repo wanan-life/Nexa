@@ -1,0 +1,38 @@
+[scan.tools]
+subfinder = true
+oneforall = true
+httpx = true
+
+[scan.online]
+providers = true
+limit = 30
+
+[providers.fofa]
+enabled = false
+email = ""
+api_key = ""
+base_url = "https://fofa.info/api/v1/search/all"
+fields = "host,ip,port,protocol,title,server,domain"
+page_size = 100
+
+[providers.hunter_qianxin]
+enabled = false
+api_key = ""
+base_url = "https://hunter.qianxin.com/openApi/search"
+page_size = 10
+is_web = 1
+status_code = ""
+start_time = ""
+end_time = ""
+
+[providers.shodan]
+enabled = false
+api_key = ""
+base_url = "https://api.shodan.io/shodan/host/search"
+page_size = 100
+
+[providers.zoomeye]
+enabled = false
+api_key = ""
+base_url = "https://api.zoomeye.org/data/search"
+page_size = 100
