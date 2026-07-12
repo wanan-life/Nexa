@@ -10,3 +10,11 @@ data/runs/
 tools/OneForAll/.venv/
 config/providers.toml
 config/nexa.toml
+config/noise_rules.json
+build/
+dist/
+!web/dist/
+!web/dist/**
+release/
+*.spec
+web/node_modules/

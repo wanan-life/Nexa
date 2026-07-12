@@ -2,10 +2,26 @@
 subfinder = true
 oneforall = true
 httpx = true
+ct_logs = true
+wayback = true
+seed_expansion = true
+pattern_expansion = true
+ct_limit = 500
+wayback_limit = 300
+expansion_limit = 250
+extracted_probe_limit = 300
+httpx_batch_size = 2000
+httpx_timeout = 900
+httpx_enrich_limit = 1000
 
 [scan.online]
-providers = true
+providers = false
 limit = 30
+
+[intel.cve_exploit]
+enabled = true
+base_url = "https://poc-in-github.motikan2010.net/api/v1/"
+timeout = 15
 
 [providers.fofa]
 enabled = false
@@ -35,4 +51,10 @@ page_size = 100
 enabled = false
 api_key = ""
 base_url = "https://api.zoomeye.org/data/search"
+page_size = 100
+
+[providers.quake_360]
+enabled = false
+api_key = ""
+base_url = "https://quake.360.net/api/v3/search/quake_service"
 page_size = 100

@@ -1,10 +1,25 @@
 import tomllib
+import sys
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
+from app.config_writer import PROVIDER_DEFAULTS
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _default_project_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path.home() / ".nexa"
+    return Path(__file__).resolve().parents[1]
+
+
+def _default_resource_root() -> Path:
+    bundled_root = getattr(sys, "_MEIPASS", None)
+    if bundled_root:
+        return Path(bundled_root)
+    return Path(__file__).resolve().parents[1]
 
 
 @dataclass(frozen=True)
@@ -12,8 +27,19 @@ class ScanToolDefaults:
     subfinder: bool = True
     oneforall: bool = True
     httpx: bool = True
-    online_providers: bool = True
+    online_providers: bool = False
     online_limit: int = 30
+    ct_logs: bool = True
+    wayback: bool = True
+    seed_expansion: bool = True
+    pattern_expansion: bool = True
+    ct_limit: int = 500
+    wayback_limit: int = 300
+    expansion_limit: int = 250
+    extracted_probe_limit: int = 300
+    httpx_batch_size: int = 2000
+    httpx_timeout: int = 900
+    httpx_enrich_limit: int = 1000
 
 
 @dataclass(frozen=True)
@@ -31,15 +57,26 @@ class ProviderConfig:
     end_time: str = ""
 
 
+@dataclass(frozen=True)
+class CveExploitIntelConfig:
+    enabled: bool = True
+    base_url: str = "https://poc-in-github.motikan2010.net/api/v1/"
+    timeout: int = 15
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
     model_config = SettingsConfigDict(env_prefix="NEXA_", env_file=".env", extra="ignore")
 
-    project_root: Path = Field(default_factory=lambda: Path(__file__).resolve().parents[1])
+    project_root: Path = Field(default_factory=_default_project_root)
     data_dir: Path | None = None
     database_url: str | None = None
     log_level: str = "INFO"
+
+    @property
+    def resource_root(self) -> Path:
+        return _default_resource_root()
 
     @property
     def resolved_data_dir(self) -> Path:
@@ -83,8 +120,19 @@ class Settings(BaseSettings):
                 subfinder=_as_bool(tools.get("subfinder"), default=True),
                 oneforall=_as_bool(tools.get("oneforall"), default=True),
                 httpx=_as_bool(tools.get("httpx"), default=True),
-                online_providers=_as_bool(online.get("providers"), default=True),
+                online_providers=_as_bool(online.get("providers"), default=False),
                 online_limit=_as_int(online.get("limit"), default=30),
+                ct_logs=_as_bool(tools.get("ct_logs"), default=True),
+                wayback=_as_bool(tools.get("wayback"), default=True),
+                seed_expansion=_as_bool(tools.get("seed_expansion"), default=True),
+                pattern_expansion=_as_bool(tools.get("pattern_expansion"), default=True),
+                ct_limit=_as_int(tools.get("ct_limit"), default=500),
+                wayback_limit=_as_int(tools.get("wayback_limit"), default=300),
+                expansion_limit=_as_int(tools.get("expansion_limit"), default=250),
+                extracted_probe_limit=_as_int(tools.get("extracted_probe_limit"), default=300),
+                httpx_batch_size=_as_int(tools.get("httpx_batch_size"), default=2000),
+                httpx_timeout=_as_int(tools.get("httpx_timeout"), default=900),
+                httpx_enrich_limit=_as_int(tools.get("httpx_enrich_limit"), default=1000),
             )
 
         if not self.scan_manifest_path.exists():
@@ -96,7 +144,11 @@ class Settings(BaseSettings):
             subfinder=_as_bool(tools.get("subfinder"), default=True),
             oneforall=_as_bool(tools.get("oneforall"), default=True),
             httpx=_as_bool(tools.get("httpx"), default=True),
-            online_providers=True,
+            online_providers=False,
+            ct_logs=True,
+            wayback=True,
+            seed_expansion=True,
+            pattern_expansion=True,
         )
 
     @property
@@ -107,24 +159,42 @@ class Settings(BaseSettings):
                 return {}
             data = tomllib.loads(self.provider_manifest_path.read_text(encoding="utf-8"))
         providers = data.get("providers", {})
+        provider_names = ["fofa", "hunter_qianxin", "shodan", "zoomeye", "quake_360"]
+        if isinstance(providers, dict):
+            provider_names.extend(name for name in providers if name not in provider_names)
         configs: dict[str, ProviderConfig] = {}
-        for name, raw in providers.items():
+        for name in provider_names:
+            raw = providers.get(name, {}) if isinstance(providers, dict) else {}
             if not isinstance(raw, dict):
                 continue
+            merged = PROVIDER_DEFAULTS.get(name, {}) | raw
             configs[name] = ProviderConfig(
                 name=name,
-                enabled=_as_bool(raw.get("enabled"), default=False),
-                base_url=str(raw.get("base_url") or ""),
-                api_key=str(raw.get("api_key") or raw.get("key") or ""),
-                email=str(raw.get("email") or ""),
-                fields=str(raw.get("fields") or ""),
-                page_size=_as_int(raw.get("page_size"), default=100),
-                is_web=_as_optional_int(raw.get("is_web")),
-                status_code=str(raw.get("status_code") or ""),
-                start_time=str(raw.get("start_time") or ""),
-                end_time=str(raw.get("end_time") or ""),
+                enabled=_as_bool(merged.get("enabled"), default=False),
+                base_url=str(merged.get("base_url") or ""),
+                api_key=str(merged.get("api_key") or merged.get("key") or ""),
+                email=str(merged.get("email") or ""),
+                fields=str(merged.get("fields") or ""),
+                page_size=_as_int(merged.get("page_size"), default=100),
+                is_web=_as_optional_int(merged.get("is_web")),
+                status_code=str(merged.get("status_code") or ""),
+                start_time=str(merged.get("start_time") or ""),
+                end_time=str(merged.get("end_time") or ""),
             )
         return configs
+
+    @property
+    def cve_exploit_intel(self) -> CveExploitIntelConfig:
+        data = self._config_data()
+        intel = data.get("intel", {}) if isinstance(data, dict) else {}
+        raw = intel.get("cve_exploit", {}) if isinstance(intel, dict) else {}
+        if not isinstance(raw, dict):
+            raw = {}
+        return CveExploitIntelConfig(
+            enabled=_as_bool(raw.get("enabled"), default=True),
+            base_url=str(raw.get("base_url") or "https://poc-in-github.motikan2010.net/api/v1/"),
+            timeout=_as_int(raw.get("timeout"), default=15),
+        )
 
     def _config_data(self) -> dict:
         if not self.app_config_path.exists():
@@ -150,13 +220,25 @@ class Settings(BaseSettings):
             )
             return self.app_config_path
 
-        example = self.config_dir / "nexa.example.toml"
+        example = self.resource_root / "config" / "nexa.example.toml"
         if example.exists():
             self.app_config_path.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
             return self.app_config_path
 
         self.app_config_path.write_text(_render_app_config({}, {}), encoding="utf-8")
         return self.app_config_path
+
+    def ensure_noise_rules_config(self) -> Path:
+        path = self.config_dir / "noise_rules.json"
+        if path.exists():
+            return path
+        self.config_dir.mkdir(parents=True, exist_ok=True)
+        example = self.resource_root / "config" / "noise_rules.example.json"
+        if example.exists():
+            path.write_text(example.read_text(encoding="utf-8"), encoding="utf-8")
+            return path
+        path.write_text("{}\n", encoding="utf-8")
+        return path
 
 
 def _as_bool(value: object, default: bool) -> bool:
@@ -181,6 +263,10 @@ def _as_int(value: object, default: int) -> int:
 def _as_optional_int(value: object) -> int | None:
     if value is None or value == "":
         return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _render_app_config(scan_data: dict, provider_data: dict) -> str:
@@ -194,10 +280,26 @@ def _render_app_config(scan_data: dict, provider_data: dict) -> str:
         f"subfinder = {_toml_bool(_as_bool(tools.get('subfinder'), default=True))}",
         f"oneforall = {_toml_bool(_as_bool(tools.get('oneforall'), default=True))}",
         f"httpx = {_toml_bool(_as_bool(tools.get('httpx'), default=True))}",
+        f"ct_logs = {_toml_bool(_as_bool(tools.get('ct_logs'), default=True))}",
+        f"wayback = {_toml_bool(_as_bool(tools.get('wayback'), default=True))}",
+        f"seed_expansion = {_toml_bool(_as_bool(tools.get('seed_expansion'), default=True))}",
+        f"pattern_expansion = {_toml_bool(_as_bool(tools.get('pattern_expansion'), default=True))}",
+        f"ct_limit = {_as_int(tools.get('ct_limit'), default=500)}",
+        f"wayback_limit = {_as_int(tools.get('wayback_limit'), default=300)}",
+        f"expansion_limit = {_as_int(tools.get('expansion_limit'), default=250)}",
+        f"extracted_probe_limit = {_as_int(tools.get('extracted_probe_limit'), default=300)}",
+        f"httpx_batch_size = {_as_int(tools.get('httpx_batch_size'), default=2000)}",
+        f"httpx_timeout = {_as_int(tools.get('httpx_timeout'), default=900)}",
+        f"httpx_enrich_limit = {_as_int(tools.get('httpx_enrich_limit'), default=1000)}",
         "",
         "[scan.online]",
-        "providers = true",
+        "providers = false",
         "limit = 30",
+        "",
+        "[intel.cve_exploit]",
+        "enabled = true",
+        'base_url = "https://poc-in-github.motikan2010.net/api/v1/"',
+        "timeout = 15",
         "",
     ]
     if providers:
@@ -206,7 +308,7 @@ def _render_app_config(scan_data: dict, provider_data: dict) -> str:
                 continue
             lines.extend(_render_provider_section(str(name), raw))
     else:
-        for name in ("fofa", "hunter_qianxin", "shodan", "zoomeye"):
+        for name in ("fofa", "hunter_qianxin", "shodan", "zoomeye", "quake_360"):
             lines.extend(_render_provider_section(name, {}))
     return "\n".join(lines).rstrip() + "\n"
 
@@ -232,6 +334,10 @@ def _render_provider_section(name: str, raw: dict) -> list[str]:
         },
         "zoomeye": {
             "base_url": "https://api.zoomeye.org/data/search",
+            "page_size": 100,
+        },
+        "quake_360": {
+            "base_url": "https://quake.360.net/api/v3/search/quake_service",
             "page_size": 100,
         },
     }
@@ -271,10 +377,6 @@ def _toml_bool(value: bool) -> str:
 
 def _escape_toml_string(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
 
 
 @lru_cache

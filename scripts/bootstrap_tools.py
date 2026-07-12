@@ -154,7 +154,8 @@ def install_oneforall(tools_dir: Path, detected: DetectedPlatform) -> None:
     venv_python = _oneforall_venv_python(target_dir, detected)
     if not venv_python.exists():
         print("OneForAll: creating local virtualenv")
-        subprocess.run([sys.executable, "-m", "venv", str(target_dir / ".venv")], check=True)
+        python = _system_python()
+        subprocess.run([python, "-m", "venv", str(target_dir / ".venv")], check=True)
 
     print("OneForAll: installing dependencies")
     subprocess.run(
@@ -174,6 +175,15 @@ def _oneforall_venv_python(target_dir: Path, detected: DetectedPlatform) -> Path
     if detected.executable_suffix:
         return target_dir / ".venv" / "Scripts" / "python.exe"
     return target_dir / ".venv" / "bin" / "python"
+
+
+def _system_python() -> str:
+    if not getattr(sys, "frozen", False):
+        return sys.executable
+    python = shutil.which("python3") or shutil.which("python")
+    if not python:
+        raise RuntimeError("OneForAll installation requires a system Python 3 interpreter")
+    return python
 
 
 if __name__ == "__main__":

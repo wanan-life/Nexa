@@ -52,6 +52,17 @@ PROVIDER_FIELD_MAPS: dict[str, dict[str, str]] = {
         "technologies": "app",
         "port": "port",
     },
+    "quake_360": {
+        "host": "domain",
+        "domain_suffix": "domain",
+        "ip": "ip",
+        "url": "url",
+        "title": "title",
+        "server": "service.http.server",
+        "technologies": "service.http.component",
+        "port": "port",
+        "status_code": "service.http.status_code",
+    },
 }
 
 
@@ -162,6 +173,8 @@ def _join_and(provider_name: str, terms: list[str]) -> str:
 
 def _join_or(provider_name: str, groups: list[str]) -> str:
     if provider_name == "shodan":
+        if len(groups) == 1:
+            return groups[0]
         return " OR ".join(f"({group})" for group in groups)
     return " || ".join(groups)
 

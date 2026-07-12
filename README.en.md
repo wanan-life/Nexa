@@ -1,109 +1,71 @@
 # Nexa
 
-[中文文档](README.md) | English
+[中文](README.md) | English
 
-![nexa](docs/images/nexa.svg)
+![Nexa](docs/images/nexa.svg)
 
-Nexa is a lightweight early-stage reconnaissance workspace for authorized bug bounty, SRC, and internal security testing.
+## Introduction
 
-The name comes from “Nexus” and “Next”: Nexa is intended to be a small connection hub for targets, assets, HTTP fingerprints, cyberspace search providers, and target-scoped local queries.
-
-Nexa intentionally stays focused on pre-engagement asset mapping:
+Nexa is an attack-surface intelligence tool for authorized bug bounty, SRC, and internal security testing. Its name combines “Nexus” and “Next”: Nexa connects asset sources, HTTP services, technology fingerprints, and evidence into searchable, reviewable target views.
 
 ```text
-Collect assets -> Normalize -> Probe HTTP -> Store fingerprints -> Search by target -> Export for review
+Collect -> Normalize -> Probe HTTP -> Store fingerprints -> Reduce noise -> Search by target
 ```
 
-It does not include destructive exploitation, automated vulnerability exploitation, authentication bypass, deep application fuzzing, JavaScript API extraction, or Burp-like request testing.
+Nexa provides both a CLI and an integrated Web workspace. It supports subfinder, OneForAll, httpx, CT logs, Wayback, and optional FOFA, Hunter, Shodan, ZoomEye, and 360 Quake queries. It does not include destructive exploitation or automated vulnerability exploitation.
 
 ## Install
 
-Requirements:
+Download the single-file executable for your platform from [Releases](https://github.com/wanan-life/Nexa/releases). The current release provides:
 
-- Python 3.11+
-- Bundled tool bootstrap detects the current OS/CPU architecture
+- `nexa-v0.2.0-macos-arm64`: Apple Silicon Mac
+
+macOS installation:
 
 ```bash
-git clone <your-repo-url> nexa
-cd nexa
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
+chmod +x nexa-v0.2.0-macos-arm64
+xattr -d com.apple.quarantine nexa-v0.2.0-macos-arm64 2>/dev/null || true
+sudo mv nexa-v0.2.0-macos-arm64 /usr/local/bin/nexa
 nexa init
 ```
 
-Download missing bundled tools:
+The Nexa executable does not require Python, Node.js, or a source checkout. `nexa init` creates `~/.nexa/` and offers to download platform-specific subfinder, httpx, and OneForAll tools. The OneForAll integration requires a system Python 3 installation.
 
-```bash
-nexa init --bootstrap-tools
+Runtime data is stored under:
+
+```text
+~/.nexa/data/nexa.db
+~/.nexa/config/nexa.toml
+~/.nexa/config/noise_rules.json
+~/.nexa/tools/
 ```
 
-Check bundled tool status:
-
-```bash
-nexa tools
-```
-
-Copy the local configuration template:
-
-```bash
-cp config/nexa.example.toml config/nexa.toml
-```
+Source development instructions are available in [Development](docs/development.md).
 
 ## Quick Start
 
-Create and list targets:
-
 ```bash
-nexa add-target jd.com --program-name "JD SRC" --scope-type in-scope
-nexa targets
-```
-
-Run target-level collection:
-
-```bash
+nexa init
+nexa add-target example.com --program-name "Example SRC"
 nexa target 1 --scan
-```
-
-Refresh HTTP probing for existing assets:
-
-```bash
-nexa scan-http --target jd.com
-```
-
-Enter target-scoped search:
-
-```bash
 nexa use 1
+nexa web
 ```
 
-Example local queries:
+Web: `http://127.0.0.1:8000`
+
+API documentation: `http://127.0.0.1:8000/docs`
+
+Interactive examples:
 
 ```text
-app="Vue.js"
-ip="127.0.0.1"
-server="nginx" && status=200
-cdn!="cloudflare"
-alive=true
-```
-
-One-shot query:
-
-```bash
-nexa use 1 -q 'server="nginx" && status=200'
-```
-
-Online provider query, after enabling API keys in `config/nexa.toml`:
-
-```bash
-nexa online-search 'domain.suffix="example.com"' --provider fofa --limit 30
-```
-
-Delete a target:
-
-```bash
-nexa delete-target jd.com
-nexa del-target jd.com
+overview
+services
+apps
+app="Vue.js" && server="nginx"
+status=200 && title="admin"
+inspect 123
+clean
 ```
 
 ## Authorship
@@ -111,4 +73,4 @@ nexa del-target jd.com
 - Primary author and developer: OpenAI Codex
 - Original idea and product direction: wanan
 
-This note documents how the repository was generated and developed: the user provided the initial idea and requirements for a bug bounty asset reconnaissance system, while OpenAI Codex handled the architecture, implementation, documentation, and iterative development.
+The user provided the original bug bounty asset-intelligence concept, field feedback, and product direction. OpenAI Codex handled architecture, implementation, documentation, and iterative development.

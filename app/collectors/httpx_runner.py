@@ -12,6 +12,8 @@ from app.utils.normalize import normalize_url
 class HTTPProbeResult:
     url: str
     input_host: str | None = None
+    ip: str | None = None
+    cname: str | None = None
     status_code: int | None = None
     title: str | None = None
     content_length: int | None = None
@@ -21,6 +23,7 @@ class HTTPProbeResult:
     waf: str | None = None
     technologies: list[str] = field(default_factory=list)
     response_headers: dict[str, Any] = field(default_factory=dict)
+    extracted_fqdns: list[str] = field(default_factory=list)
 
     @property
     def host(self) -> str:
@@ -48,6 +51,8 @@ def parse_httpx_json_line(line: str) -> HTTPProbeResult | None:
     return HTTPProbeResult(
         url=normalized_url,
         input_host=data.get("input") or data.get("host"),
+        ip=_first_string(data.get("a") or data.get("ip") or data.get("host_ip")),
+        cname=_first_string(data.get("cname")),
         status_code=int(status_code) if status_code is not None else None,
         title=data.get("title"),
         content_length=int(content_length) if content_length is not None else None,
@@ -56,7 +61,8 @@ def parse_httpx_json_line(line: str) -> HTTPProbeResult | None:
         cdn=data.get("cdn_name") or data.get("cdn"),
         waf=data.get("waf"),
         technologies=[str(item) for item in technologies],
-        response_headers=data.get("header") or data.get("headers") or {},
+        response_headers=_parse_headers(data.get("header") or data.get("headers") or {}),
+        extracted_fqdns=_parse_extracted_fqdns(data),
     )
 
 
@@ -77,7 +83,7 @@ class HTTPXRunner:
         self.binary = binary
         self.timeout = timeout
 
-    async def probe_file(self, hosts_file: Path) -> list[HTTPProbeResult]:
+    async def probe_file(self, hosts_file: Path, enrich: bool = False) -> list[HTTPProbeResult]:
         command = [
             self.binary,
             "-l",
@@ -87,12 +93,26 @@ class HTTPXRunner:
             "-title",
             "-status-code",
             "-content-length",
+            "-content-type",
+            "-location",
             "-favicon",
             "-server",
             "-tech-detect",
             "-cdn",
+            "-ip",
+            "-cname",
+            "-http2",
             "-follow-host-redirects",
         ]
+        if enrich:
+            command.extend(
+                [
+                    "-include-response-header",
+                    "-extract-fqdn",
+                    "-csp-probe",
+                    "-tls-probe",
+                ]
+            )
         result = await run_command(command, timeout=self.timeout)
         results: list[HTTPProbeResult] = []
         for line_number, line in enumerate(result.stdout.splitlines(), start=1):
@@ -103,3 +123,59 @@ class HTTPXRunner:
             if parsed:
                 results.append(parsed)
         return results
+
+
+def _parse_headers(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        return {}
+    headers: dict[str, Any] = {}
+    for line in value.splitlines():
+        if ":" not in line:
+            continue
+        key, raw_value = line.split(":", 1)
+        key = key.strip()
+        if key:
+            headers[key] = raw_value.strip()
+    return headers
+
+
+def _parse_extracted_fqdns(data: dict[str, Any]) -> list[str]:
+    candidates: list[str] = []
+    for key in ("extract_fqdn", "extract-fqdn", "extracted_fqdn", "extracted-fqdn", "fqdn", "fqdns"):
+        _extend_strings(candidates, data.get(key))
+    extracted = data.get("extracts")
+    if isinstance(extracted, dict):
+        for key in ("fqdn", "fqdns", "extract_fqdn", "extract-fqdn"):
+            _extend_strings(candidates, extracted.get(key))
+    return _dedupe_strings(candidates)
+
+
+def _first_string(value: Any) -> str | None:
+    if isinstance(value, list):
+        for item in value:
+            if item:
+                return str(item)
+        return None
+    if value:
+        return str(value)
+    return None
+
+
+def _extend_strings(target: list[str], value: Any) -> None:
+    if isinstance(value, list):
+        target.extend(str(item) for item in value if item)
+    elif isinstance(value, str):
+        target.extend(item.strip() for item in value.replace(",", "\n").splitlines() if item.strip())
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        normalized = value.strip().lower().strip(".")
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    return result

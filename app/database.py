@@ -16,9 +16,9 @@ engine = get_engine()
 
 
 def init_db() -> None:
-    from app.models import asset, api_endpoint, fingerprint, jsfile, risk, service, target
+    from app.models import asset, asset_group, api_endpoint, evidence, fingerprint, jsfile, risk, service, target
 
-    _ = (asset, api_endpoint, fingerprint, jsfile, risk, service, target)
+    _ = (asset, asset_group, api_endpoint, evidence, fingerprint, jsfile, risk, service, target)
     SQLModel.metadata.create_all(engine)
 
 

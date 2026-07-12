@@ -161,12 +161,43 @@ class ZoomEyeProvider(BaseHttpProvider):
         )
 
 
+class Quake360Provider(BaseHttpProvider):
+    name = "quake_360"
+
+    def _search(
+        self,
+        client: httpx.Client,
+        query: str,
+        limit: int,
+    ) -> tuple[list[OnlineAssetResult], OnlineSearchMeta]:
+        headers = {"X-QuakeToken": self.config.api_key, "Content-Type": "application/json"}
+        page_size = min(max(1, self.config.page_size), limit)
+        payload = {"query": query, "start": 0, "size": page_size}
+        response = client.post(self.config.base_url, json=payload, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        _raise_code_error(self.name, data)
+        rows = data.get("data") or []
+        if isinstance(rows, dict):
+            rows = rows.get("items") or rows.get("list") or []
+        results = [_from_quake_row(row) for row in rows[:limit] if isinstance(row, dict)]
+        meta_data = data.get("meta") if isinstance(data.get("meta"), dict) else {}
+        total = _as_int(data.get("total") or meta_data.get("total"))
+        return results, OnlineSearchMeta(
+            provider=self.name,
+            total=total,
+            returned=len(results),
+            message=str(data.get("message") or data.get("msg") or ""),
+        )
+
+
 def build_provider(config: ProviderConfig) -> BaseHttpProvider:
     providers: dict[str, type[BaseHttpProvider]] = {
         "fofa": FofaProvider,
         "hunter_qianxin": HunterQianxinProvider,
         "shodan": ShodanProvider,
         "zoomeye": ZoomEyeProvider,
+        "quake_360": Quake360Provider,
     }
     provider_type = providers.get(config.name)
     if not provider_type:
@@ -242,6 +273,39 @@ def _from_zoomeye_row(row: dict[str, Any]) -> OnlineAssetResult:
     )
 
 
+def _from_quake_row(row: dict[str, Any]) -> OnlineAssetResult:
+    service = row.get("service") if isinstance(row.get("service"), dict) else {}
+    http = service.get("http") if isinstance(service.get("http"), dict) else {}
+    components = http.get("components") or http.get("component") or service.get("components") or []
+    technologies = _as_string_list(components)
+    host = (
+        _first_string(row.get("domain"))
+        or _first_string(row.get("domains"))
+        or _first_string(http.get("host"))
+        or _hostname(str(http.get("url") or ""))
+    )
+    ip = str(row.get("ip") or _nested_value(row, "ip", "ip") or "")
+    port = _as_int(row.get("port") or service.get("port"))
+    url = str(http.get("url") or "")
+    if not url and host and port:
+        scheme = "https" if port == 443 else "http"
+        url = f"{scheme}://{host}"
+    server = str(http.get("server") or service.get("name") or "")
+    if not server and technologies:
+        server = ", ".join(technologies[:3])
+    return OnlineAssetResult(
+        provider="quake_360",
+        host=host,
+        ip=ip,
+        port=port,
+        url=url,
+        title=str(http.get("title") or row.get("title") or ""),
+        server=server,
+        technologies=technologies,
+        raw=row,
+    )
+
+
 def _b64(value: str) -> str:
     return base64.b64encode(value.encode("utf-8")).decode("ascii")
 
@@ -258,7 +322,7 @@ def _raise_fofa_error(payload: dict[str, Any]) -> None:
 
 def _raise_code_error(provider: str, payload: dict[str, Any]) -> None:
     code = payload.get("code")
-    if code in {None, 200, "200"}:
+    if code in {None, 0, "0", 200, "200"}:
         return
     message = payload.get("msg") or payload.get("message") or "API error"
     raise ProviderApiError(f"{provider} API code={code}: {message}")
@@ -302,3 +366,22 @@ def _nested_list(payload: dict[str, Any], *keys: str) -> list[Any]:
             return []
         current = current.get(key)
     return current if isinstance(current, list) else []
+
+
+def _nested_value(payload: dict[str, Any], *keys: str) -> Any:
+    current: Any = payload
+    for key in keys:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _first_string(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        for item in value:
+            if isinstance(item, str) and item:
+                return item
+    return ""

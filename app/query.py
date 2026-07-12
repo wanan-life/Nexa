@@ -5,6 +5,7 @@ from typing import Any
 from sqlmodel import Session, select
 
 from app.models.asset import Asset
+from app.models.asset_group import AssetClassification
 from app.models.service import Service
 
 
@@ -16,6 +17,7 @@ class QuerySyntaxError(ValueError):
 class SearchRow:
     asset: Asset
     service: Service | None
+    classification: AssetClassification | None = None
 
 
 @dataclass(frozen=True)
@@ -23,6 +25,14 @@ class QueryTerm:
     field: str
     operator: str
     value: str
+
+
+@dataclass(frozen=True)
+class AppSummary:
+    name: str
+    service_count: int
+    asset_count: int
+    sample_hosts: list[str]
 
 
 FIELD_ALIASES = {
@@ -50,7 +60,19 @@ FIELD_ALIASES = {
     "cname": "cname",
     "favicon": "favicon_hash",
     "favicon_hash": "favicon_hash",
+    "header": "response_headers",
+    "headers": "response_headers",
+    "response_header": "response_headers",
+    "response_headers": "response_headers",
     "alive": "is_alive",
+    "category": "category",
+    "noise": "noise_score",
+    "noise_score": "noise_score",
+    "value": "discovery_value",
+    "discovery_value": "discovery_value",
+    "tier": "tier",
+    "group": "group_id",
+    "group_id": "group_id",
 }
 
 TERM_RE = re.compile(
@@ -70,12 +92,55 @@ def search_target_assets(session: Session, target_id: int, query: str, limit: in
 
 def list_target_rows(session: Session, target_id: int) -> list[SearchRow]:
     statement = (
-        select(Asset, Service)
+        select(Asset, Service, AssetClassification)
         .join(Service, Service.asset_id == Asset.id, isouter=True)
+        .join(AssetClassification, AssetClassification.service_id == Service.id, isouter=True)
         .where(Asset.target_id == target_id)
         .order_by(Asset.host, Service.url)
     )
-    return [SearchRow(asset=asset, service=service) for asset, service in session.exec(statement).all()]
+    return [
+        SearchRow(asset=asset, service=service, classification=classification)
+        for asset, service, classification in session.exec(statement).all()
+    ]
+
+
+def list_target_apps(session: Session, target_id: int, limit: int = 100) -> list[AppSummary]:
+    rows = list_target_rows(session, target_id)
+    apps: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not row.service or not row.service.technologies:
+            continue
+        for raw_name in row.service.technologies:
+            name = str(raw_name).strip()
+            if not name:
+                continue
+            key = name.lower()
+            entry = apps.setdefault(
+                key,
+                {
+                    "name": name,
+                    "service_ids": set(),
+                    "asset_ids": set(),
+                    "hosts": [],
+                },
+            )
+            if row.service.id is not None:
+                entry["service_ids"].add(row.service.id)
+            if row.asset.id is not None:
+                entry["asset_ids"].add(row.asset.id)
+            if row.asset.host not in entry["hosts"]:
+                entry["hosts"].append(row.asset.host)
+
+    summaries = [
+        AppSummary(
+            name=str(entry["name"]),
+            service_count=len(entry["service_ids"]),
+            asset_count=len(entry["asset_ids"]),
+            sample_hosts=list(entry["hosts"])[:3],
+        )
+        for entry in apps.values()
+    ]
+    return sorted(summaries, key=lambda item: (-item.service_count, item.name.lower()))[:limit]
 
 
 def parse_query(query: str) -> list[list[QueryTerm]]:
@@ -120,6 +185,9 @@ def _field_value(row: SearchRow, field: str) -> Any:
     asset_fields = {"host", "ip", "source", "cname", "is_alive"}
     if field in asset_fields:
         return getattr(row.asset, field)
+    classification_fields = {"category", "noise_score", "discovery_value", "tier", "group_id"}
+    if field in classification_fields:
+        return getattr(row.classification, field) if row.classification else None
     if not row.service:
         return None
     return getattr(row.service, field)

@@ -6,6 +6,8 @@ from sqlmodel import Session, select
 
 from app.models.api_endpoint import APIEndpoint
 from app.models.asset import Asset
+from app.models.asset_group import AssetClassification, AssetGroup
+from app.models.evidence import AssetEvidence, AssetSeed
 from app.models.fingerprint import Fingerprint
 from app.models.jsfile import JSFile
 from app.models.risk import RiskFinding
@@ -86,6 +88,22 @@ class TargetRepository:
         findings = list(
             self.session.exec(select(RiskFinding).where(RiskFinding.target_id == target.id)).all()
         )
+        evidences = list(
+            self.session.exec(select(AssetEvidence).where(AssetEvidence.target_id == target.id)).all()
+        )
+        seeds = list(self.session.exec(select(AssetSeed).where(AssetSeed.target_id == target.id)).all())
+        groups = list(self.session.exec(select(AssetGroup).where(AssetGroup.target_id == target.id)).all())
+        classifications = list(
+            self.session.exec(select(AssetClassification).where(AssetClassification.target_id == target.id)).all()
+        )
+        for classification in classifications:
+            self.session.delete(classification)
+        for group in groups:
+            self.session.delete(group)
+        for evidence in evidences:
+            self.session.delete(evidence)
+        for seed in seeds:
+            self.session.delete(seed)
         for finding in findings:
             self.session.delete(finding)
         for service in services:
@@ -261,3 +279,151 @@ class ServiceRepository:
         if scheme == "https":
             return 443
         return None
+
+
+class AssetEvidenceRepository:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def upsert(
+        self,
+        *,
+        target_id: int,
+        source: str,
+        provider: str | None = None,
+        query: str | None = None,
+        query_type: str | None = None,
+        raw_host: str | None = None,
+        raw_url: str | None = None,
+        asset_id: int | None = None,
+        service_id: int | None = None,
+        ip: str | None = None,
+        port: int | None = None,
+        title: str | None = None,
+        confidence: int = 50,
+        raw_snapshot: dict | None = None,
+    ) -> AssetEvidence:
+        existing = self._find_existing(
+            target_id=target_id,
+            source=source,
+            provider=provider,
+            query=query,
+            raw_host=raw_host,
+            raw_url=raw_url,
+        )
+        if existing:
+            existing.asset_id = asset_id or existing.asset_id
+            existing.service_id = service_id or existing.service_id
+            existing.query_type = query_type or existing.query_type
+            existing.ip = ip or existing.ip
+            existing.port = port or existing.port
+            existing.title = title or existing.title
+            existing.confidence = max(existing.confidence, confidence)
+            existing.raw_snapshot = raw_snapshot or existing.raw_snapshot
+            existing.last_seen = now_utc()
+            self.session.add(existing)
+            self.session.commit()
+            self.session.refresh(existing)
+            return existing
+
+        evidence = AssetEvidence(
+            target_id=target_id,
+            asset_id=asset_id,
+            service_id=service_id,
+            source=source,
+            provider=provider,
+            query=query,
+            query_type=query_type,
+            raw_host=raw_host,
+            raw_url=raw_url,
+            ip=ip,
+            port=port,
+            title=title,
+            confidence=confidence,
+            raw_snapshot=raw_snapshot or {},
+        )
+        self.session.add(evidence)
+        self.session.commit()
+        self.session.refresh(evidence)
+        return evidence
+
+    def list_by_target(self, target_id: int, limit: int = 100) -> list[AssetEvidence]:
+        statement = (
+            select(AssetEvidence)
+            .where(AssetEvidence.target_id == target_id)
+            .order_by(AssetEvidence.last_seen.desc())
+            .limit(limit)
+        )
+        return list(self.session.exec(statement).all())
+
+    def source_counts(self, target_id: int) -> dict[str, int]:
+        rows = self.session.exec(select(AssetEvidence).where(AssetEvidence.target_id == target_id)).all()
+        counts: dict[str, int] = {}
+        for row in rows:
+            key = row.provider if row.source == "online" and row.provider else row.source
+            counts[key] = counts.get(key, 0) + 1
+        return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+    def _find_existing(
+        self,
+        *,
+        target_id: int,
+        source: str,
+        provider: str | None,
+        query: str | None,
+        raw_host: str | None,
+        raw_url: str | None,
+    ) -> AssetEvidence | None:
+        statement = select(AssetEvidence).where(
+            AssetEvidence.target_id == target_id,
+            AssetEvidence.source == source,
+            AssetEvidence.provider == provider,
+            AssetEvidence.query == query,
+            AssetEvidence.raw_host == raw_host,
+            AssetEvidence.raw_url == raw_url,
+        )
+        return self.session.exec(statement).first()
+
+
+class AssetSeedRepository:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def upsert(self, target_id: int, host: str, source: str = "manual", note: str | None = None) -> AssetSeed:
+        normalized_host = normalize_host(host)
+        statement = select(AssetSeed).where(
+            AssetSeed.target_id == target_id,
+            AssetSeed.host == normalized_host,
+        )
+        existing = self.session.exec(statement).first()
+        if existing:
+            existing.source = source
+            existing.note = note or existing.note
+            existing.updated_at = now_utc()
+            self.session.add(existing)
+            self.session.commit()
+            self.session.refresh(existing)
+            return existing
+
+        seed = AssetSeed(target_id=target_id, host=normalized_host, source=source, note=note)
+        self.session.add(seed)
+        self.session.commit()
+        self.session.refresh(seed)
+        return seed
+
+    def list_by_target(self, target_id: int) -> list[AssetSeed]:
+        statement = select(AssetSeed).where(AssetSeed.target_id == target_id).order_by(AssetSeed.host)
+        return list(self.session.exec(statement).all())
+
+    def delete(self, target_id: int, host: str) -> bool:
+        normalized_host = normalize_host(host)
+        statement = select(AssetSeed).where(
+            AssetSeed.target_id == target_id,
+            AssetSeed.host == normalized_host,
+        )
+        seed = self.session.exec(statement).first()
+        if not seed:
+            return False
+        self.session.delete(seed)
+        self.session.commit()
+        return True

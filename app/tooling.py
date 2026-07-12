@@ -1,4 +1,5 @@
 import platform
+import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,6 +51,8 @@ class ToolResolver:
         venv_python = self.oneforall_workdir / ".venv" / oneforall_venv_python_path()
         if venv_python.exists():
             return venv_python
+        if getattr(sys, "frozen", False):
+            return Path(shutil.which("python3") or "python3")
         return Path(sys.executable)
 
     def statuses(self) -> list[ToolStatus]:

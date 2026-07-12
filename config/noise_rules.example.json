@@ -1,0 +1,71 @@
+{
+  "high_value_keywords": [
+    "admin",
+    "api",
+    "auth",
+    "cas",
+    "console",
+    "dev",
+    "gateway",
+    "login",
+    "manager",
+    "merchant",
+    "open",
+    "order",
+    "partner",
+    "pay",
+    "portal",
+    "pre",
+    "sso",
+    "supplier",
+    "test",
+    "uat",
+    "user"
+  ],
+  "doc_keywords": [
+    "swagger",
+    "openapi",
+    "api-docs",
+    "knife4j",
+    "redoc",
+    "graphql"
+  ],
+  "generic_titles": [
+    "",
+    "301 moved permanently",
+    "302 found",
+    "403 forbidden",
+    "404 not found",
+    "500 internal server error",
+    "502 bad gateway",
+    "503 service temporarily unavailable"
+  ],
+  "category_rules": [
+    {
+      "name": "jd-shop-template",
+      "category": "shop-template",
+      "title_regex": [
+        "京东自营旗舰店",
+        "旗舰店\\s*-\\s*京东",
+        "专营店\\s*-\\s*京东",
+        "自营店\\s*-\\s*京东"
+      ],
+      "noise_delta": 80,
+      "value_delta": -40,
+      "reason": "命中京东店铺套用模板"
+    },
+    {
+      "name": "taobao-shop-template",
+      "category": "shop-template",
+      "title_regex": [
+        "淘宝店铺",
+        "天猫旗舰店",
+        "旗舰店\\s*-\\s*淘宝",
+        "旗舰店\\s*-\\s*天猫"
+      ],
+      "noise_delta": 80,
+      "value_delta": -40,
+      "reason": "命中淘宝或天猫店铺套用模板"
+    }
+  ]
+}
