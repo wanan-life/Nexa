@@ -5,6 +5,7 @@ import re
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
+from sqlalchemy import func
 from sqlmodel import Session, delete, select
 
 from app.models.asset import Asset
@@ -79,6 +80,53 @@ def classify_target_assets(session: Session, target_id: int) -> NoiseSummary:
     )
 
 
+def summarize_target_noise(session: Session, target_id: int) -> NoiseSummary:
+    """Return aggregate noise-reduction counts for a target without listing rows."""
+
+    _ensure_classified(session, target_id)
+    groups = _scalar_count(
+        session, select(func.count()).select_from(AssetGroup).where(AssetGroup.target_id == target_id)
+    )
+    high_noise_groups = _scalar_count(
+        session,
+        select(func.count())
+        .select_from(AssetGroup)
+        .where(AssetGroup.target_id == target_id)
+        .where(AssetGroup.noise_level == "high"),
+    )
+    classifications = _scalar_count(
+        session,
+        select(func.count())
+        .select_from(AssetClassification)
+        .where(AssetClassification.target_id == target_id),
+    )
+    outliers = _scalar_count(
+        session,
+        select(func.count())
+        .select_from(AssetClassification)
+        .where(AssetClassification.target_id == target_id)
+        .where(AssetClassification.outlier == True),
+    )
+    return NoiseSummary(
+        groups=groups,
+        classifications=classifications,
+        high_noise_groups=high_noise_groups,
+        outliers=outliers,
+    )
+
+
+def _scalar_count(session: Session, statement) -> int:
+    value = session.exec(statement).first()
+    if value is None:
+        return 0
+    if isinstance(value, tuple):
+        value = value[0]
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def list_asset_groups(session: Session, target_id: int, limit: int = 50) -> list[GroupView]:
     _ensure_classified(session, target_id)
     statement = (
@@ -138,7 +186,7 @@ def list_outliers(session: Session, target_id: int, limit: int = 50) -> list[Cla
         .join(Service, Service.id == AssetClassification.service_id, isouter=True)
         .join(AssetGroup, AssetGroup.id == AssetClassification.group_id, isouter=True)
         .where(AssetClassification.target_id == target_id)
-        .where(AssetClassification.outlier == True)  # noqa: E712
+        .where(AssetClassification.outlier == True)
         .order_by(AssetClassification.discovery_value.desc(), Asset.host)
         .limit(limit)
     )

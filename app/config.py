@@ -40,6 +40,11 @@ class ScanToolDefaults:
     httpx_batch_size: int = 2000
     httpx_timeout: int = 900
     httpx_enrich_limit: int = 1000
+    httpx_request_timeout: int = 10
+    httpx_retries: int = 0
+    httpx_rate_limit: int = 200
+    httpx_threads: int = 100
+    httpx_rescan_dead: bool = False
 
 
 @dataclass(frozen=True)
@@ -133,6 +138,11 @@ class Settings(BaseSettings):
                 httpx_batch_size=_as_int(tools.get("httpx_batch_size"), default=2000),
                 httpx_timeout=_as_int(tools.get("httpx_timeout"), default=900),
                 httpx_enrich_limit=_as_int(tools.get("httpx_enrich_limit"), default=1000),
+                httpx_request_timeout=_as_int(tools.get("httpx_request_timeout"), default=10),
+                httpx_retries=_as_int(tools.get("httpx_retries"), default=0),
+                httpx_rate_limit=_as_int(tools.get("httpx_rate_limit"), default=200),
+                httpx_threads=_as_int(tools.get("httpx_threads"), default=100),
+                httpx_rescan_dead=_as_bool(tools.get("httpx_rescan_dead"), default=False),
             )
 
         if not self.scan_manifest_path.exists():
@@ -291,6 +301,11 @@ def _render_app_config(scan_data: dict, provider_data: dict) -> str:
         f"httpx_batch_size = {_as_int(tools.get('httpx_batch_size'), default=2000)}",
         f"httpx_timeout = {_as_int(tools.get('httpx_timeout'), default=900)}",
         f"httpx_enrich_limit = {_as_int(tools.get('httpx_enrich_limit'), default=1000)}",
+        f"httpx_request_timeout = {_as_int(tools.get('httpx_request_timeout'), default=10)}",
+        f"httpx_retries = {_as_int(tools.get('httpx_retries'), default=0)}",
+        f"httpx_rate_limit = {_as_int(tools.get('httpx_rate_limit'), default=200)}",
+        f"httpx_threads = {_as_int(tools.get('httpx_threads'), default=100)}",
+        f"httpx_rescan_dead = {_toml_bool(_as_bool(tools.get('httpx_rescan_dead'), default=False))}",
         "",
         "[scan.online]",
         "providers = false",

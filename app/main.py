@@ -6,6 +6,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session
 
+from app import __version__
 from app.api.routes import router as api_router
 from app.config import get_settings
 from app.database import get_session, init_db
@@ -16,7 +17,7 @@ from app.schemas.target import TargetCreate, TargetRead
 
 app = FastAPI(
     title="Nexa",
-    version="0.2.0",
+    version=__version__,
     description="Attack surface intelligence platform for authorized bug bounty workflows.",
 )
 

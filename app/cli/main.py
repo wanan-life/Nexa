@@ -1,12 +1,15 @@
+import shutil
 import sys
 
+import typer
 from prompt_toolkit import HTML, PromptSession
 from prompt_toolkit.history import InMemoryHistory
-import typer
+from prompt_toolkit.shortcuts import CompleteStyle
 from rich.box import SIMPLE_HEAVY
 from rich.console import Console
 from rich.table import Table
 
+from app.cli.completion import NexaAutoSuggest, NexaCompleter
 from app.config import get_settings
 from app.database import create_session, init_db
 from app.intel import CveExploitClient, CveExploitResult
@@ -21,6 +24,7 @@ from app.noise import (
     list_noisy_assets,
     list_outliers,
 )
+from app.noise_rules import load_noise_rules
 from app.pipelines.recon import (
     ReconSummary,
     collect_target_sync,
@@ -28,10 +32,16 @@ from app.pipelines.recon import (
 from app.providers.base import OnlineAssetResult, OnlineSearchMeta
 from app.providers.search import search_online_assets
 from app.prune import PrunePreview, preview_prune, preview_prune_group, prune_group, prune_query
-from app.query import AppSummary, QuerySyntaxError, SearchRow, list_target_apps, list_target_rows, search_target_assets
+from app.query import (
+    AppSummary,
+    QuerySyntaxError,
+    SearchRow,
+    list_target_apps,
+    list_target_rows,
+    search_target_assets,
+)
 from app.repositories import AssetEvidenceRepository, AssetSeedRepository, TargetRepository
 from app.risk import RiskAssetSummary, analyze_target_risk, preview_target_risk, top_risk_assets
-from app.noise_rules import load_noise_rules
 from app.schemas.target import TargetCreate
 from app.tooling import ToolResolver
 from app.web_runtime import WebBuildError, ensure_frontend_bundle
@@ -90,6 +100,11 @@ HELP_GROUPS: list[dict[str, object]] = [
                 "web",
                 "Start the integrated Web workspace and API server.",
                 "一条命令启动集成式 Web 管理台与 API 服务。",
+            ),
+            (
+                "mcp",
+                "Run the MCP server over stdio for AI clients.",
+                "启动面向 AI 客户端的 MCP 服务（stdio）。",
             ),
             (
                 "cve-poc",
@@ -548,6 +563,12 @@ def _print_interactive_help() -> None:
     )
     command_table.add_row("help", "显示帮助。\nShow this help.", "help")
     command_table.add_row("exit", "退出当前目标工作区。\nLeave the target workspace.", "exit")
+    command_table.add_row(
+        "Tab / →",
+        "Tab 补全命令与查询字段；→ 接受灰色联想（如输入 ov 提示 erview）。\n"
+        "Tab completes commands/fields; → accepts the inline suggestion.",
+        "app⇥",
+    )
     console.print(command_table)
 
     query_table = Table(title="查询语法 / Query Syntax", box=SIMPLE_HEAVY, show_lines=False)
@@ -650,6 +671,7 @@ def _scan_target(
     use_httpx: bool | None,
     use_online: bool | None,
     strict: bool,
+    rescan_dead: bool = False,
 ) -> None:
     resolved_subfinder, resolved_oneforall, resolved_httpx, resolved_online = _resolve_scan_tools(
         use_subfinder,
@@ -668,6 +690,7 @@ def _scan_target(
                 run_httpx=resolved_httpx,
                 use_online_providers=resolved_online,
                 continue_on_error=not strict,
+                rescan_dead=rescan_dead,
                 progress_callback=lambda message: status.update(f"[cyan]{message}[/cyan]"),
             )
             status.update("[cyan]Classifying asset groups and noise...[/cyan]")
@@ -861,6 +884,58 @@ def web_server(
     )
 
 
+def _mcp_server_command() -> list[str]:
+    """Return the argv prefix that starts the Nexa MCP server on this install."""
+
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
+    nexa_binary = shutil.which("nexa")
+    if nexa_binary:
+        return [nexa_binary]
+    return [sys.executable, "-m", "app.mcp"]
+
+
+def _print_mcp_config(allow_scan: bool) -> None:
+    command = _mcp_server_command()
+    args = [*command[1:], "mcp"]
+    if allow_scan:
+        args.append("--allow-scan")
+    console.print_json(
+        data={"mcpServers": {"nexa": {"command": command[0], "args": args}}}
+    )
+
+
+@app.command("mcp")
+def mcp_server(
+    allow_scan: bool = typer.Option(
+        False,
+        "--allow-scan",
+        help="Also expose the scan_target tool (runs bundled external recon tools).",
+    ),
+    print_config: bool = typer.Option(
+        False,
+        "--print-config",
+        help="Print an MCP client JSON config snippet and exit.",
+    ),
+) -> None:
+    """Run the Nexa MCP server over stdio for AI clients."""
+
+    if print_config:
+        _print_mcp_config(allow_scan)
+        return
+    init_db()
+    # stdout carries the JSON-RPC stream, so status output must go to stderr only.
+    Console(stderr=True).print(
+        "[bold green]Nexa MCP server[/bold green] listening on stdio"
+        + (" (scan_target enabled)" if allow_scan else "")
+    )
+    try:
+        from app.mcp.server import run_stdio
+    except ImportError as exc:
+        raise typer.BadParameter("the 'mcp' package is required to run `nexa mcp`") from exc
+    run_stdio(enable_scan=allow_scan)
+
+
 def _print_online_results(results: list[OnlineAssetResult], title: str) -> None:
     table = Table(title=title)
     table.add_column("Provider")
@@ -1044,6 +1119,11 @@ def target_command(
     httpx: bool | None = typer.Option(None, "--httpx/--no-httpx", help="Override httpx config."),
     online: bool | None = typer.Option(None, "--online/--no-online", help="Override online provider config."),
     strict: bool = typer.Option(False, "--strict", help="Stop on first collector error."),
+    rescan_dead: bool = typer.Option(
+        False,
+        "--rescan-dead",
+        help="Re-probe assets already known to be dead (slower, but catches hosts that came back).",
+    ),
 ) -> None:
     """Show or scan a target by id/name."""
 
@@ -1052,7 +1132,7 @@ def target_command(
         _print_target_extra_arg_hint(target_ref, ctx.args)
         raise typer.Exit(code=2)
     if scan:
-        _scan_target(target_ref, subfinder, oneforall, httpx, online, strict)
+        _scan_target(target_ref, subfinder, oneforall, httpx, online, strict, rescan_dead)
         return
     with create_session() as session:
         target_obj = _require_target_ref(session, target_ref)
@@ -1109,10 +1189,18 @@ def use_target(
         console.print(
             f"[bold green]Using target[/bold green] {target_obj.id}: {target_obj.name}\n"
             'Query examples: app="Vue.js", ip="127.0.0.1", app="vue.js" && server="nginx"\n'
-            "Commands: help, overview, services, apps, inspect <id>, clean, exit"
+            "Commands: help, overview, services, apps, inspect <id>, clean, exit\n"
+            "[dim]Tab 补全命令/字段，→ 接受灰色联想。Tab completes, → accepts the suggestion.[/dim]"
         )
         prompt = HTML(f'<ansicyan><b>{target_obj.name}</b></ansicyan> <ansigreen><b>&gt;</b></ansigreen> ')
-        prompt_session = PromptSession(history=InMemoryHistory())
+        completer = NexaCompleter()
+        prompt_session = PromptSession(
+            history=InMemoryHistory(),
+            completer=completer,
+            auto_suggest=NexaAutoSuggest(completer),
+            complete_style=CompleteStyle.MULTI_COLUMN,
+            enable_history_search=True,
+        )
         while True:
             try:
                 text = prompt_session.prompt(prompt).strip()
@@ -1325,23 +1413,31 @@ def delete_target(name: str) -> None:
 def scan_http(
     target: str = typer.Option(..., help="Target name."),
     strict: bool = typer.Option(False, "--strict", help="Stop on collector errors."),
+    rescan_dead: bool = typer.Option(
+        False,
+        "--rescan-dead",
+        help="Re-probe assets already known to be dead (slower).",
+    ),
 ) -> None:
     """Probe existing assets with httpx."""
 
     init_db()
     with create_session() as session:
         target_obj = _require_target(session, target)
-        summary = collect_target_sync(
-            session,
-            target_obj,
-            use_subfinder=False,
-            use_oneforall=False,
-            run_httpx=True,
-            use_online_providers=False,
-            use_passive_sources=False,
-            use_expanders=False,
-            continue_on_error=not strict,
-        )
+        with console.status("[cyan]Starting httpx probe...[/cyan]", spinner="dots") as status:
+            summary = collect_target_sync(
+                session,
+                target_obj,
+                use_subfinder=False,
+                use_oneforall=False,
+                run_httpx=True,
+                use_online_providers=False,
+                use_passive_sources=False,
+                use_expanders=False,
+                continue_on_error=not strict,
+                rescan_dead=rescan_dead,
+                progress_callback=lambda message: status.update(f"[cyan]{message}[/cyan]"),
+            )
         noise_summary = classify_target_assets(session, target_obj.id)
     _print_recon_summary(summary)
     _print_recon_diff(summary)
@@ -1357,6 +1453,11 @@ def collect_target_command(
     httpx: bool | None = typer.Option(None, "--httpx/--no-httpx", help="Override httpx config."),
     online: bool | None = typer.Option(None, "--online/--no-online", help="Override online provider config."),
     strict: bool = typer.Option(False, "--strict", help="Stop on first collector error."),
+    rescan_dead: bool = typer.Option(
+        False,
+        "--rescan-dead",
+        help="Re-probe assets already known to be dead (slower).",
+    ),
 ) -> None:
     """Run target collection pipeline with subfinder/oneforall/httpx."""
 
@@ -1379,6 +1480,7 @@ def collect_target_command(
                 run_httpx=resolved_httpx,
                 use_online_providers=resolved_online,
                 continue_on_error=not strict,
+                rescan_dead=rescan_dead,
                 progress_callback=lambda message: status.update(f"[cyan]{message}[/cyan]"),
             )
             status.update("[cyan]Classifying asset groups and noise...[/cyan]")

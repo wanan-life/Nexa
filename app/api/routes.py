@@ -41,6 +41,7 @@ class ScanPayload(BaseModel):
     httpx: bool | None = None
     online: bool | None = None
     strict: bool = False
+    rescan_dead: bool = False
 
 
 class OnlineSearchPayload(BaseModel):
@@ -136,6 +137,7 @@ def scan_target(target_ref: str, payload: ScanPayload) -> dict[str, Any]:
         run_httpx=payload.httpx,
         use_online_providers=payload.online,
         strict=payload.strict,
+        rescan_dead=payload.rescan_dead,
     )
     return job.as_dict()
 

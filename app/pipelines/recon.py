@@ -1,17 +1,19 @@
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import UTC
 from pathlib import Path
 
-from sqlmodel import Session
+from sqlalchemy import func
+from sqlmodel import Session, select
 
+from app.analyzers.tech_analyzer import infer_technologies
 from app.collectors.base import CollectedAsset, CollectorError
 from app.collectors.httpx_runner import HTTPProbeResult, HTTPXRunner, parse_httpx_jsonl
 from app.collectors.oneforall import OneForAllCollector, parse_oneforall_file
 from app.collectors.passive import CTLogCollector, WaybackCollector
 from app.collectors.subfinder import SubfinderCollector, parse_subfinder_file
 from app.config import get_settings
-from app.analyzers.tech_analyzer import infer_technologies
 from app.expanders import expand_from_patterns, expand_from_seeds
 from app.models.asset import Asset
 from app.models.service import Service
@@ -19,7 +21,12 @@ from app.models.target import Target
 from app.providers.base import OnlineAssetResult
 from app.providers.query import build_target_query
 from app.providers.search import search_online_assets
-from app.repositories import AssetEvidenceRepository, AssetRepository, AssetSeedRepository, ServiceRepository
+from app.repositories import (
+    AssetEvidenceRepository,
+    AssetRepository,
+    AssetSeedRepository,
+    ServiceRepository,
+)
 from app.schemas.asset import AssetCreate
 from app.schemas.service import ServiceCreate
 from app.tooling import ToolResolver
@@ -173,6 +180,7 @@ async def collect_target(
     use_expanders: bool = True,
     tool_resolver: ToolResolver | None = None,
     continue_on_error: bool = True,
+    rescan_dead: bool = False,
     progress_callback: ProgressCallback | None = None,
 ) -> ReconSummary:
     if target.id is None:
@@ -322,19 +330,48 @@ async def collect_target(
 
     if run_httpx:
         _emit(progress_callback, "Preparing hosts for httpx")
-        assets = AssetRepository(session).list_by_target(target.id)
+        probe_assets, skipped_dead = _select_probe_assets(
+            session,
+            target.id,
+            rescan_dead=rescan_dead,
+        )
+        if skipped_dead:
+            _emit(
+                progress_callback,
+                f"Skipping {skipped_dead} known-dead assets already probed "
+                "(set httpx_rescan_dead=true or pass --rescan-dead to force)",
+            )
         try:
-            _emit(progress_callback, f"Running httpx for {len(assets)} assets")
-            runner = HTTPXRunner(binary=str(tools.httpx_binary), timeout=settings.scan_tool_defaults.httpx_timeout)
-            httpx_results = await _probe_assets_in_batches(
+            _emit(progress_callback, f"Running httpx for {len(probe_assets)} assets")
+            runner = HTTPXRunner(
+                binary=str(tools.httpx_binary),
+                timeout=settings.scan_tool_defaults.httpx_timeout,
+                request_timeout=settings.scan_tool_defaults.httpx_request_timeout,
+                retries=settings.scan_tool_defaults.httpx_retries,
+                rate_limit=settings.scan_tool_defaults.httpx_rate_limit,
+                threads=settings.scan_tool_defaults.httpx_threads,
+            )
+            # Results are persisted batch by batch so a slow or timed-out batch
+            # never discards the work already done.
+            probe_stats = await _probe_assets_in_batches(
+                session=session,
+                target_id=target.id,
                 runner=runner,
                 target_name=target.name,
-                assets=assets,
+                assets=probe_assets,
                 batch_size=settings.scan_tool_defaults.httpx_batch_size,
                 progress_callback=progress_callback,
             )
-            _emit(progress_callback, f"Upserting {len(httpx_results)} HTTP services")
-            summary.services_seen = upsert_httpx_results(session, target.id, httpx_results)
+            summary.services_seen = probe_stats.services_seen
+            alive_hosts = set(probe_stats.alive_hosts)
+            for error in probe_stats.errors:
+                summary.collector_results.append(CollectorRunResult("httpx:batch", 0, error))
+            _emit(
+                progress_callback,
+                f"Probed {probe_stats.hosts_probed} hosts in {probe_stats.duration:.0f}s, "
+                f"{probe_stats.services_seen} services stored",
+            )
+
             enrich_assets = _select_enrichment_assets(
                 session,
                 target.id,
@@ -344,10 +381,17 @@ async def collect_target(
             if enrich_assets:
                 _emit(progress_callback, f"Running httpx enrichment for {len(enrich_assets)} selected assets")
                 enrich_file = _write_hosts_file(target.name, enrich_assets, filename="httpx-enrich-hosts.txt")
-                enrich_results = await runner.probe_file(enrich_file, enrich=True)
+                enrich_outcome = await runner.probe_file(
+                    enrich_file,
+                    enrich=True,
+                    label="httpx enrich",
+                    on_progress=progress_callback,
+                )
+                enrich_results = enrich_outcome.results
                 summary.services_seen += upsert_httpx_results(session, target.id, enrich_results)
+                alive_hosts.update(result.host for result in enrich_results)
                 summary.collector_results.append(
-                    CollectorRunResult("httpx:enrich", len(enrich_results), None)
+                    CollectorRunResult("httpx:enrich", len(enrich_results), enrich_outcome.error)
                 )
             extracted_assets = upsert_httpx_extracted_fqdns(session, target.id, target.root_domain, enrich_results)
             summary.assets_seen += extracted_assets
@@ -369,13 +413,20 @@ async def collect_target(
                         filename="httpx-extracted-hosts.txt",
                     )
                     _emit(progress_callback, f"Running httpx second pass for {len(extracted_hosts)} extracted hosts")
-                    second_pass_results = await runner.probe_file(extracted_hosts_file, enrich=False)
+                    second_outcome = await runner.probe_file(
+                        extracted_hosts_file,
+                        enrich=False,
+                        label="httpx second pass",
+                        on_progress=progress_callback,
+                    )
+                    second_pass_results = second_outcome.results
                     second_pass_services = upsert_httpx_results(session, target.id, second_pass_results)
                     summary.services_seen += second_pass_services
+                    alive_hosts.update(result.host for result in second_pass_results)
                     summary.collector_results.append(
-                        CollectorRunResult("httpx:second-pass", second_pass_services, None)
+                        CollectorRunResult("httpx:second-pass", second_pass_services, second_outcome.error)
                     )
-            summary.alive_assets = len({result.host for result in [*httpx_results, *enrich_results, *second_pass_results]})
+            summary.alive_assets = len(alive_hosts)
             summary.collector_results.append(CollectorRunResult("httpx", summary.services_seen, None))
             _emit(
                 progress_callback,
@@ -583,22 +634,112 @@ def _host_in_scope(host: str, root_domain: str) -> bool:
     return bool(host and root and (host == root or host.endswith(f".{root}")))
 
 
+@dataclass
+class _ProbeStats:
+    services_seen: int = 0
+    hosts_probed: int = 0
+    duration: float = 0.0
+    alive_hosts: set[str] = field(default_factory=set)
+    errors: list[str] = field(default_factory=list)
+
+
 async def _probe_assets_in_batches(
+    session: Session,
+    target_id: int,
     runner: HTTPXRunner,
     target_name: str,
     assets: list[Asset],
     batch_size: int,
     progress_callback: ProgressCallback | None,
-) -> list[HTTPProbeResult]:
+) -> _ProbeStats:
+    """Probe assets batch by batch, persisting each batch as soon as it finishes."""
+
+    stats = _ProbeStats()
     if batch_size <= 0:
         batch_size = 2000
-    results: list[HTTPProbeResult] = []
     total = len(assets)
-    for index, batch in enumerate(_chunks(assets, batch_size), start=1):
-        _emit(progress_callback, f"Running httpx batch {index} ({len(batch)}/{total})")
+    batches = list(_chunks(assets, batch_size))
+    if not batches:
+        return stats
+
+    for index, batch in enumerate(batches, start=1):
+        label = f"httpx batch {index}/{len(batches)}"
+        _emit(progress_callback, f"{label}: probing {len(batch)} hosts ({total} total)")
         hosts_file = _write_hosts_file(target_name, batch, filename=f"httpx-hosts-{index}.txt")
-        results.extend(await runner.probe_file(hosts_file, enrich=False))
-    return results
+        outcome = await runner.probe_file(
+            hosts_file,
+            enrich=False,
+            label=label,
+            on_progress=progress_callback,
+        )
+        stats.duration += outcome.duration
+        stats.hosts_probed += len(batch)
+        stats.services_seen += upsert_httpx_results(session, target_id, outcome.results)
+        stats.alive_hosts.update(result.host for result in outcome.results)
+        if outcome.error:
+            message = f"{label} {outcome.error} (kept {len(outcome.results)} responses)"
+            stats.errors.append(message)
+            _emit(progress_callback, message)
+        else:
+            _emit(
+                progress_callback,
+                f"{label} done: {len(outcome.results)} responses in {outcome.duration:.0f}s",
+            )
+    return stats
+
+
+def _select_probe_assets(
+    session: Session,
+    target_id: int,
+    rescan_dead: bool = False,
+) -> tuple[list[Asset], int]:
+    """Choose which assets to probe.
+
+    Re-probing tens of thousands of hosts that already failed is the main reason
+    a scan appears to hang. By default we always re-probe live assets plus any
+    asset discovered since the last probe, and skip hosts already known to be
+    dead. ``rescan_dead`` forces a full re-probe.
+    """
+
+    assets = AssetRepository(session).list_by_target(target_id)
+    if rescan_dead or not assets:
+        return assets, 0
+
+    last_probe = _last_probe_time(session, target_id)
+    if last_probe is None:
+        return assets, 0
+
+    selected: list[Asset] = []
+    skipped = 0
+    for asset in assets:
+        first_seen = _as_naive_utc(asset.first_seen)
+        if asset.is_alive or (first_seen is not None and first_seen > last_probe):
+            selected.append(asset)
+        else:
+            skipped += 1
+    return selected, skipped
+
+
+def _last_probe_time(session: Session, target_id: int):
+    statement = (
+        select(func.max(Service.last_checked_at))
+        .join(Asset, Asset.id == Service.asset_id)
+        .where(Asset.target_id == target_id)
+    )
+    value = session.exec(statement).first()
+    if isinstance(value, tuple):
+        value = value[0]
+    return _as_naive_utc(value)
+
+
+def _as_naive_utc(value):
+    """Normalize a datetime for comparison (SQLite returns naive UTC values)."""
+
+    if value is None:
+        return None
+    if getattr(value, "tzinfo", None) is not None:
+        return value.astimezone(UTC).replace(tzinfo=None)
+    return value
 
 
 def _select_enrichment_assets(session: Session, target_id: int, limit: int) -> list[Asset]:

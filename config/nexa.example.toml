@@ -10,9 +10,16 @@ ct_limit = 500
 wayback_limit = 300
 expansion_limit = 250
 extracted_probe_limit = 300
-httpx_batch_size = 2000
-httpx_timeout = 900
-httpx_enrich_limit = 1000
+# httpx probing. Assets already probed and found dead are skipped unless
+# httpx_rescan_dead = true, which is the main reason a large target stays fast.
+httpx_batch_size = 2000        # hosts per httpx invocation (results persist per batch)
+httpx_timeout = 900            # hard cap per batch, in seconds
+httpx_enrich_limit = 1000      # alive assets to re-probe with header/fqdn enrichment
+httpx_request_timeout = 10     # httpx -timeout: per-request timeout, in seconds
+httpx_retries = 0              # httpx -retries
+httpx_rate_limit = 200         # httpx -rate-limit: requests per second (0 = unlimited)
+httpx_threads = 100            # httpx -threads
+httpx_rescan_dead = false      # true = re-probe every asset, including known-dead ones
 
 [scan.online]
 providers = false

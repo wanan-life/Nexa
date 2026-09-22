@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import os
 import platform
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = "0.2.0"
+VERSION = "0.3.0"
+
+# Keep PyInstaller's build cache inside the project instead of the user profile
+# so builds stay reproducible and do not depend on $HOME write access.
+os.environ.setdefault("PYINSTALLER_CONFIG_DIR", str(ROOT / ".pyinstaller"))
 
 
 def main() -> None:
@@ -39,6 +43,14 @@ def main() -> None:
         "uvicorn.protocols.websockets.auto",
         "--hidden-import",
         "uvicorn.lifespan.on",
+        "--hidden-import",
+        "anyio._backends._asyncio",
+        "--hidden-import",
+        "mcp.server.mcpserver",
+        "--hidden-import",
+        "mcp.server.mcpserver.tools",
+        "--hidden-import",
+        "mcp.server.mcpserver.utilities",
         str(ROOT / "scripts" / "nexa_entry.py"),
     ]
     subprocess.run(command, cwd=ROOT, check=True)

@@ -1,11 +1,19 @@
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from app.collectors.base import run_command
+from app.collectors.base import CommandProgress, run_command_streaming
 from app.utils.normalize import normalize_url
+
+DEFAULT_REQUEST_TIMEOUT = 10
+DEFAULT_RETRIES = 0
+DEFAULT_RATE_LIMIT = 200
+DEFAULT_THREADS = 100
+DEFAULT_MAX_HOST_ERROR = 30
+PROGRESS_INTERVAL = 10.0
 
 
 @dataclass(frozen=True)
@@ -29,6 +37,22 @@ class HTTPProbeResult:
     def host(self) -> str:
         parsed = urlparse(self.url)
         return parsed.hostname or self.input_host or self.url
+
+
+@dataclass(frozen=True)
+class ProbeOutcome:
+    """Result of one httpx invocation, including why it ended."""
+
+    results: list[HTTPProbeResult]
+    duration: float = 0.0
+    timed_out: bool = False
+    returncode: int = 0
+    malformed_lines: int = 0
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return not self.timed_out and self.error is None
 
 
 def parse_httpx_json_line(line: str) -> HTTPProbeResult | None:
@@ -79,17 +103,41 @@ def parse_httpx_jsonl(path: Path) -> list[HTTPProbeResult]:
 
 
 class HTTPXRunner:
-    def __init__(self, binary: str = "httpx", timeout: int = 1800) -> None:
+    def __init__(
+        self,
+        binary: str = "httpx",
+        timeout: int = 1800,
+        request_timeout: int = DEFAULT_REQUEST_TIMEOUT,
+        retries: int = DEFAULT_RETRIES,
+        rate_limit: int = DEFAULT_RATE_LIMIT,
+        threads: int = DEFAULT_THREADS,
+        max_host_error: int = DEFAULT_MAX_HOST_ERROR,
+    ) -> None:
         self.binary = binary
         self.timeout = timeout
+        self.request_timeout = request_timeout
+        self.retries = retries
+        self.rate_limit = rate_limit
+        self.threads = threads
+        self.max_host_error = max_host_error
 
-    async def probe_file(self, hosts_file: Path, enrich: bool = False) -> list[HTTPProbeResult]:
+    def build_command(self, hosts_file: Path, enrich: bool = False) -> list[str]:
         command = [
             self.binary,
             "-l",
             str(hosts_file),
             "-json",
             "-silent",
+            "-no-color",
+            "-disable-update-check",
+            "-timeout",
+            str(self.request_timeout),
+            "-retries",
+            str(self.retries),
+            "-threads",
+            str(self.threads),
+            "-max-host-error",
+            str(self.max_host_error),
             "-title",
             "-status-code",
             "-content-length",
@@ -104,6 +152,8 @@ class HTTPXRunner:
             "-http2",
             "-follow-host-redirects",
         ]
+        if self.rate_limit and self.rate_limit > 0:
+            command.extend(["-rate-limit", str(self.rate_limit)])
         if enrich:
             command.extend(
                 [
@@ -113,16 +163,66 @@ class HTTPXRunner:
                     "-tls-probe",
                 ]
             )
-        result = await run_command(command, timeout=self.timeout)
+        return command
+
+    async def probe_file(
+        self,
+        hosts_file: Path,
+        enrich: bool = False,
+        label: str = "httpx",
+        on_progress: Callable[[str], None] | None = None,
+    ) -> ProbeOutcome:
+        """Probe a hosts file, streaming parse results and periodic progress.
+
+        A timeout or crash keeps the results already produced instead of losing
+        the whole batch.
+        """
+
         results: list[HTTPProbeResult] = []
-        for line_number, line in enumerate(result.stdout.splitlines(), start=1):
+        malformed = 0
+
+        def handle_line(line: str) -> None:
+            nonlocal malformed
             try:
                 parsed = parse_httpx_json_line(line)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"invalid httpx output at line {line_number}: {exc}") from exc
+            except json.JSONDecodeError:
+                malformed += 1
+                return
             if parsed:
                 results.append(parsed)
-        return results
+
+        def handle_progress(progress: CommandProgress) -> None:
+            if not on_progress:
+                return
+            on_progress(
+                f"{label}: {len(results)} responses, {progress.stdout_lines} lines, "
+                f"{progress.elapsed:.0f}s elapsed"
+            )
+
+        command = self.build_command(hosts_file, enrich=enrich)
+        result = await run_command_streaming(
+            command,
+            timeout=self.timeout,
+            on_stdout_line=handle_line,
+            on_progress=handle_progress if on_progress else None,
+            progress_interval=PROGRESS_INTERVAL,
+        )
+
+        error: str | None = None
+        if result.timed_out:
+            error = f"timed out after {self.timeout}s"
+        elif result.returncode != 0:
+            detail = (result.stderr.strip() or result.stdout.strip() or "").splitlines()
+            error = f"exit code {result.returncode}" + (f": {detail[-1]}" if detail else "")
+
+        return ProbeOutcome(
+            results=results,
+            duration=result.duration,
+            timed_out=result.timed_out,
+            returncode=result.returncode,
+            malformed_lines=malformed,
+            error=error,
+        )
 
 
 def _parse_headers(value: Any) -> dict[str, Any]:

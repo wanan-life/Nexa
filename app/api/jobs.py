@@ -56,13 +56,23 @@ def start_scan_job(
     run_httpx: bool | None = None,
     use_online_providers: bool | None = None,
     strict: bool = False,
+    rescan_dead: bool = False,
 ) -> WebJob:
     job = WebJob(id=str(uuid.uuid4()), kind="scan", target=target_ref)
     with _lock:
         _jobs[job.id] = job
     thread = threading.Thread(
         target=_run_scan_job,
-        args=(job.id, target_ref, use_subfinder, use_oneforall, run_httpx, use_online_providers, strict),
+        args=(
+            job.id,
+            target_ref,
+            use_subfinder,
+            use_oneforall,
+            run_httpx,
+            use_online_providers,
+            strict,
+            rescan_dead,
+        ),
         daemon=True,
     )
     thread.start()
@@ -77,6 +87,7 @@ def _run_scan_job(
     run_httpx: bool | None,
     use_online_providers: bool | None,
     strict: bool,
+    rescan_dead: bool,
 ) -> None:
     _update_job(job_id, status="running", message="Starting scan pipeline")
     try:
@@ -98,6 +109,7 @@ def _run_scan_job(
                 run_httpx=resolved_httpx,
                 use_online_providers=resolved_online,
                 continue_on_error=not strict,
+                rescan_dead=rescan_dead,
                 progress_callback=lambda message: _update_job(job_id, message=message),
             )
             _update_job(job_id, message="Classifying asset groups and noise")

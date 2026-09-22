@@ -4,6 +4,7 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+.pyinstaller/
 .DS_Store
 data/*.db
 data/runs/
