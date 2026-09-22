@@ -18,14 +18,14 @@ Nexa 提供 CLI 与一体化 Web 管理台，支持 subfinder、OneForAll、http
 
 推荐直接从 [Releases](https://github.com/wanan-life/Nexa/releases) 下载与系统架构匹配的单文件程序。当前提供：
 
-- `nexa-v0.2.0-macos-arm64`：Apple Silicon Mac
+- `nexa-v0.3.0-macos-arm64`：Apple Silicon Mac
 
 macOS 安装示例：
 
 ```bash
-chmod +x nexa-v0.2.0-macos-arm64
-xattr -d com.apple.quarantine nexa-v0.2.0-macos-arm64 2>/dev/null || true
-sudo mv nexa-v0.2.0-macos-arm64 /usr/local/bin/nexa
+chmod +x nexa-v0.3.0-macos-arm64
+xattr -d com.apple.quarantine nexa-v0.3.0-macos-arm64 2>/dev/null || true
+sudo mv nexa-v0.3.0-macos-arm64 /usr/local/bin/nexa
 nexa init
 ```
 

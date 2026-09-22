@@ -18,14 +18,14 @@ Nexa provides both a CLI and an integrated Web workspace. It supports subfinder,
 
 Download the single-file executable for your platform from [Releases](https://github.com/wanan-life/Nexa/releases). The current release provides:
 
-- `nexa-v0.2.0-macos-arm64`: Apple Silicon Mac
+- `nexa-v0.3.0-macos-arm64`: Apple Silicon Mac
 
 macOS installation:
 
 ```bash
-chmod +x nexa-v0.2.0-macos-arm64
-xattr -d com.apple.quarantine nexa-v0.2.0-macos-arm64 2>/dev/null || true
-sudo mv nexa-v0.2.0-macos-arm64 /usr/local/bin/nexa
+chmod +x nexa-v0.3.0-macos-arm64
+xattr -d com.apple.quarantine nexa-v0.3.0-macos-arm64 2>/dev/null || true
+sudo mv nexa-v0.3.0-macos-arm64 /usr/local/bin/nexa
 nexa init
 ```
 
